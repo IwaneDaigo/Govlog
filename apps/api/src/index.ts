@@ -16,6 +16,19 @@ type TwinCity = {
   score: number;
 };
 
+type SimilarityRequest = {
+  base_cdArea: string;
+  candidate_cdAreas: string[];
+  limit: number;
+  keywords?: string[];
+};
+
+type SimilarityResponse = {
+  items: string[];
+  names?: Record<string, string>;
+  scores?: Record<string, number>;
+};
+
 type TwinsMap = Record<string, TwinCity[]>;
 
 type RawPolicy = {
@@ -51,6 +64,7 @@ type MunicipalityMasterItem = {
 
 const dataDir = resolve(__dirname, "../../../data");
 const policiesPdfDir = resolve(dataDir, "policies-pdf");
+const similarityApiBaseUrl = process.env.SIMILARITY_API_BASE_URL?.trim();
 
 const readJsonWithFallback = <T>(primaryFileName: string, fallbackFileName: string): T => {
   const primaryPath = resolve(dataDir, primaryFileName);
@@ -227,6 +241,48 @@ const requireSession = (
   return municipality;
 };
 
+const buildTop5CitiesFromSimilarity = async (baseCode: string, keyword: string): Promise<TwinCity[] | null> => {
+  if (!similarityApiBaseUrl) return null;
+
+  const candidateCodes = Object.keys(municipalities).filter((code) => code !== baseCode);
+  if (candidateCodes.length === 0) return null;
+
+  const payload: SimilarityRequest = {
+    base_cdArea: baseCode,
+    candidate_cdAreas: candidateCodes,
+    limit: 5,
+    keywords: keyword ? [keyword] : []
+  };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const response = await fetch(`${similarityApiBaseUrl}/similarity`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    if (!response.ok) return null;
+
+    const result = (await response.json()) as SimilarityResponse;
+    const topItems = (result.items ?? []).slice(0, 5);
+    if (topItems.length === 0) return null;
+
+    return topItems.map((code) => ({
+      municipalityCode: code,
+      municipalityName:
+        result.names?.[code] ?? municipalities[code]?.name ?? municipalityMasterByCode[code]?.municipalityDisplayName ?? code,
+      score: result.scores?.[code] ?? 0
+    }));
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 app.post<{ Body: { municipalityCode: string } }>("/api/auth/login", async (request, reply) => {
   const { municipalityCode } = request.body;
   if (!municipalityCode) {
@@ -287,7 +343,8 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   if (!municipality) return;
 
   const keyword = (request.query.keyword ?? "").trim().toLowerCase();
-  const top5Cities = (twins[municipality.code] ?? []).slice(0, 5);
+  const top5FromSimilarity = await buildTop5CitiesFromSimilarity(municipality.code, keyword);
+  const top5Cities = top5FromSimilarity ?? (twins[municipality.code] ?? []).slice(0, 5);
   const top5Set = new Set(top5Cities.map((city) => city.municipalityCode));
 
   const matched = policies.filter((policy) => {

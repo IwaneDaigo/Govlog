@@ -12,3 +12,12 @@ Thumbs.db
 
 *.log
 *.tmp
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Python caches
+__pycache__/
+*.pyc

@@ -42,6 +42,30 @@ pnpm dev
 - `GET /api/search?keyword=...`
 - `GET /api/policies/:policyId`
 
+## Similarity Service Integration
+
+`/api/search` can use the Python similarity service first, and fallback to `data/twins.json` if unavailable.
+
+1. Start Python service:
+
+```bash
+cd python-similarity
+pip install -r requirements.txt
+cp .env.example .env
+# set ESTAT_APP_ID in .env
+uvicorn app.main:app --reload
+```
+
+2. Start Gov-Sync API with endpoint:
+
+```bash
+# PowerShell example
+$env:SIMILARITY_API_BASE_URL="http://localhost:8000"
+pnpm --filter @gov-sync/api dev
+```
+
+When `SIMILARITY_API_BASE_URL` is not set or the service fails, API falls back to twins JSON.
+
 ## Replace With Real Data
 
 The API loads real files first and falls back to sample files.
