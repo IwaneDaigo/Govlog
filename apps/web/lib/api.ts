@@ -74,6 +74,8 @@ export const api = {
       `/api/municipalities?query=${encodeURIComponent(query)}&limit=${limit}`
     ),
   search: (keyword: string) =>
-    request<{ top5Cities: TwinCity[]; policies: Policy[] }>(`/api/search?keyword=${encodeURIComponent(keyword)}`),
+    request<{ top5Cities: TwinCity[]; similarCities?: TwinCity[]; worstCities?: TwinCity[]; policies: Policy[] }>(
+      `/api/search?keyword=${encodeURIComponent(keyword)}`
+    ),
   policy: (policyId: string) => request<{ policy: Policy }>(`/api/policies/${policyId}`)
 };

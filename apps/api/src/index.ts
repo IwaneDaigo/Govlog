@@ -4,6 +4,7 @@ import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { SimilarityClient, type SimilarityRequest } from "./lib/similarity-client";
 
 type Municipality = {
   code: string;
@@ -14,19 +15,6 @@ type TwinCity = {
   municipalityCode: string;
   municipalityName: string;
   score: number;
-};
-
-type SimilarityRequest = {
-  base_cdArea: string;
-  candidate_cdAreas: string[];
-  limit: number;
-  keywords?: string[];
-};
-
-type SimilarityResponse = {
-  items: string[];
-  names?: Record<string, string>;
-  scores?: Record<string, number>;
 };
 
 type TwinsMap = Record<string, TwinCity[]>;
@@ -65,6 +53,7 @@ type MunicipalityMasterItem = {
 const dataDir = resolve(__dirname, "../../../data");
 const policiesPdfDir = resolve(dataDir, "policies-pdf");
 const similarityApiBaseUrl = process.env.SIMILARITY_API_BASE_URL?.trim();
+const similarityClient = similarityApiBaseUrl ? new SimilarityClient(similarityApiBaseUrl) : null;
 
 const readJsonWithFallback = <T>(primaryFileName: string, fallbackFileName: string): T => {
   const primaryPath = resolve(dataDir, primaryFileName);
@@ -241,45 +230,59 @@ const requireSession = (
   return municipality;
 };
 
-const buildTop5CitiesFromSimilarity = async (baseCode: string, keyword: string): Promise<TwinCity[] | null> => {
+const normalizeToCdArea = (code: string): string | null => {
+  const trimmed = code.trim();
+  if (/^\d{5}$/.test(trimmed)) return trimmed;
+  // Some master/demo codes are 6-digit JIS style with check digit.
+  if (/^\d{6}$/.test(trimmed)) return trimmed.slice(0, 5);
+  return null;
+};
+
+const buildSimilarCitiesFromSimilarity = async (
+  baseCode: string,
+  keyword: string
+): Promise<TwinCity[] | null> => {
   if (!similarityApiBaseUrl) return null;
 
-  const candidateCodes = Object.keys(municipalities).filter((code) => code !== baseCode);
+  const normalizedBaseCode = normalizeToCdArea(baseCode);
+  if (!normalizedBaseCode) return null;
+
+  const candidateCodes = Array.from(
+    new Set(
+      Object.keys(municipalities)
+        .map((code) => normalizeToCdArea(code))
+        .filter((code): code is string => Boolean(code) && code !== normalizedBaseCode)
+    )
+  );
   if (candidateCodes.length === 0) return null;
 
   const payload: SimilarityRequest = {
-    base_cdArea: baseCode,
+    base_cdArea: normalizedBaseCode,
     candidate_cdAreas: candidateCodes,
-    limit: 5,
+    limit: candidateCodes.length,
     keywords: keyword ? [keyword] : []
   };
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-
   try {
-    const response = await fetch(`${similarityApiBaseUrl}/similarity`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal
+    if (!similarityClient) return null;
+    const result = await similarityClient.similarity(payload);
+    const items = result.items ?? [];
+    if (items.length === 0) return null;
+
+    return items.map((code) => {
+      const masterName = municipalityMasterByCode[code]?.municipalityDisplayName ?? municipalityMasterByCode[code]?.municipalityName;
+      const localName =
+        municipalities[code]?.name ??
+        Object.entries(municipalities).find(([rawCode]) => normalizeToCdArea(rawCode) === code)?.[1].name;
+
+      return {
+        municipalityCode: code,
+        municipalityName: result.names?.[code] ?? masterName ?? localName ?? code,
+        score: result.scores?.[code] ?? 0
+      };
     });
-    if (!response.ok) return null;
-
-    const result = (await response.json()) as SimilarityResponse;
-    const topItems = (result.items ?? []).slice(0, 5);
-    if (topItems.length === 0) return null;
-
-    return topItems.map((code) => ({
-      municipalityCode: code,
-      municipalityName:
-        result.names?.[code] ?? municipalities[code]?.name ?? municipalityMasterByCode[code]?.municipalityDisplayName ?? code,
-      score: result.scores?.[code] ?? 0
-    }));
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
   }
 };
 
@@ -342,27 +345,44 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   const municipality = requireSession(request, reply);
   if (!municipality) return;
 
-  const keyword = (request.query.keyword ?? "").trim().toLowerCase();
-  const top5FromSimilarity = await buildTop5CitiesFromSimilarity(municipality.code, keyword);
-  const top5Cities = top5FromSimilarity ?? (twins[municipality.code] ?? []).slice(0, 5);
-  const top5Set = new Set(top5Cities.map((city) => city.municipalityCode));
+  const rawKeyword = (request.query.keyword ?? "").trim();
+  const keyword = rawKeyword.toLowerCase();
+  const similarCitiesFromSimilarity = await buildSimilarCitiesFromSimilarity(municipality.code, rawKeyword);
+  const similarCities = similarCitiesFromSimilarity ?? (twins[municipality.code] ?? []).slice(0, 5);
+  const top5Cities = similarCities.slice(0, 5);
+  const worstCities = similarCities.length > 20 ? [...similarCities].slice(-20).reverse() : [...similarCities].reverse();
+  const top5Set = new Set(top5Cities.map((city) => normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode));
+  const top5Rank = new Map(top5Cities.map((city, idx) => [normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode, idx]));
 
-  const matched = policies.filter((policy) => {
+  const keywordMatched = policies.filter((policy) => {
     if (!keyword) return true;
     const haystack = `${policy.title} ${policy.summary} ${policy.details} ${policy.keywords.join(" ")}`.toLowerCase();
     return haystack.includes(keyword);
   });
 
-  const prioritized = matched.sort((a, b) => {
-    const aRank = top5Set.has(a.municipalityCode) ? 0 : 1;
-    const bRank = top5Set.has(b.municipalityCode) ? 0 : 1;
-    if (aRank !== bRank) return aRank - bRank;
-    return a.id.localeCompare(b.id);
-  });
+  // Pick policies that are both keyword-matched and implemented by similar municipalities.
+  const fromTop5Cities = keywordMatched
+    .filter((policy) => {
+      const policyCode = normalizeToCdArea(policy.municipalityCode) ?? policy.municipalityCode;
+      return top5Set.has(policyCode);
+    })
+    .sort((a, b) => {
+      const aCode = normalizeToCdArea(a.municipalityCode) ?? a.municipalityCode;
+      const bCode = normalizeToCdArea(b.municipalityCode) ?? b.municipalityCode;
+      const aRank = top5Rank.get(aCode) ?? Number.MAX_SAFE_INTEGER;
+      const bRank = top5Rank.get(bCode) ?? Number.MAX_SAFE_INTEGER;
+      if (aRank !== bRank) return aRank - bRank;
+      return a.id.localeCompare(b.id);
+    });
+
+  // Fallback: if no top5 policy matches, keep previous behavior and return keyword-matched list.
+  const policiesToReturn = fromTop5Cities.length > 0 ? fromTop5Cities : keywordMatched;
 
   return {
     top5Cities,
-    policies: prioritized
+    similarCities: similarCities.slice(0, 20),
+    worstCities,
+    policies: policiesToReturn
   };
 });
 

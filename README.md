@@ -27,6 +27,12 @@ pnpm dev
 - Web: `http://localhost:3000`
 - API: `http://localhost:4000`
 
+Python類似度APIも含めて一括起動する場合:
+
+```bash
+pnpm dev:all
+```
+
 ## Demo Login
 
 - Code: `131016`

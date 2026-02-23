@@ -21,3 +21,4 @@ Thumbs.db
 # Python caches
 __pycache__/
 *.pyc
+.venv/
