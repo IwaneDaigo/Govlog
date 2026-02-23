@@ -1,10 +1,13 @@
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
+import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { SimilarityClient, type SimilarityRequest } from "./lib/similarity-client";
+import { importPoliciesFromPdf } from "./services/pdf-import";
 
 type Municipality = {
   code: string;
@@ -50,10 +53,26 @@ type MunicipalityMasterItem = {
   municipalityDisplayName: string;
 };
 
-const dataDir = resolve(__dirname, "../../../data");
+const rootDir = resolve(__dirname, "../../../");
+const dataDir = resolve(rootDir, "data");
 const policiesPdfDir = resolve(dataDir, "policies-pdf");
 const similarityApiBaseUrl = process.env.SIMILARITY_API_BASE_URL?.trim();
 const similarityClient = similarityApiBaseUrl ? new SimilarityClient(similarityApiBaseUrl) : null;
+const uploadTempDir = resolve(rootDir, "data/uploads");
+
+type PendingImport = {
+  tempAbsPath: string;
+  tempRelativePath: string;
+  municipalityCode: string;
+  municipalityName: string;
+  idPrefix: string;
+  outDir: string;
+  policiesOutPath: string;
+  mergeToPoliciesJson: boolean;
+  createdAt: number;
+};
+
+const pendingImports = new Map<string, PendingImport>();
 
 const readJsonWithFallback = <T>(primaryFileName: string, fallbackFileName: string): T => {
   const primaryPath = resolve(dataDir, primaryFileName);
@@ -136,8 +155,7 @@ const toPdfUrl = (pdfPath?: string): string | undefined => {
   return `/files/policies/${encoded}`;
 };
 
-const rawPolicies = readJsonWithFallback<RawPolicy[]>("policies.json", "policies.sample.json");
-const policies: Policy[] = rawPolicies.map((item) => ({
+const toPolicy = (item: RawPolicy): Policy => ({
   id: item.id,
   municipalityCode: item.municipalityCode,
   municipalityName: item.municipalityName,
@@ -147,7 +165,10 @@ const policies: Policy[] = rawPolicies.map((item) => ({
   keywords: item.keywords ?? [],
   pdfPath: normalizePdfPath(item.pdfPath),
   pdfUrl: toPdfUrl(item.pdfPath)
-}));
+});
+
+const rawPolicies = readJsonWithFallback<RawPolicy[]>("policies.json", "policies.sample.json");
+let policies: Policy[] = rawPolicies.map(toPolicy);
 
 const twins = readJsonWithFallback<TwinsMap>("twins.json", "twins.sample.json");
 const municipalityMaster = readMunicipalityMasterCsv();
@@ -193,6 +214,12 @@ app.register(cors, {
 app.register(cookie, {
   secret: "gov-sync-dev-secret"
 });
+app.register(multipart, {
+  limits: {
+    files: 1,
+    fileSize: 100 * 1024 * 1024
+  }
+});
 
 if (existsSync(policiesPdfDir)) {
   app.register(fastifyStatic, {
@@ -204,11 +231,16 @@ if (existsSync(policiesPdfDir)) {
 }
 
 const getSession = (request: { cookies: Record<string, string | undefined> }): Municipality | null => {
-  const code = request.cookies.municipalityCode;
-  if (!code) return null;
-  const user = municipalities[code];
-  if (!user) return null;
-  return { code, name: user.name };
+  const rawCode = request.cookies.municipalityCode;
+  if (!rawCode) return null;
+  const direct = municipalities[rawCode];
+  if (direct) return { code: rawCode, name: direct.name };
+
+  const normalized = normalizeToCdArea(rawCode);
+  if (!normalized) return null;
+  const normalizedUser = municipalities[normalized];
+  if (!normalizedUser) return null;
+  return { code: normalized, name: normalizedUser.name };
 };
 
 const sessionCookieOptions = {
@@ -228,6 +260,21 @@ const requireSession = (
     return null;
   }
   return municipality;
+};
+
+const cleanupOldPendingImports = () => {
+  const expireMs = 30 * 60 * 1000;
+  const now = Date.now();
+  for (const [token, item] of pendingImports.entries()) {
+    if (now - item.createdAt > expireMs) {
+      try {
+        if (existsSync(item.tempAbsPath)) unlinkSync(item.tempAbsPath);
+      } catch {
+        // no-op
+      }
+      pendingImports.delete(token);
+    }
+  }
 };
 
 const normalizeToCdArea = (code: string): string | null => {
@@ -292,18 +339,253 @@ app.post<{ Body: { municipalityCode: string } }>("/api/auth/login", async (reque
     return reply.code(400).send({ message: "municipalityCode is required" });
   }
 
-  const user = municipalities[municipalityCode];
+  const trimmedCode = municipalityCode.trim();
+  const normalizedCode = normalizeToCdArea(trimmedCode);
+  const resolvedCode =
+    municipalities[trimmedCode] ? trimmedCode : normalizedCode && municipalities[normalizedCode] ? normalizedCode : null;
+  if (!resolvedCode) {
+    return reply.code(401).send({ message: "Invalid municipality code" });
+  }
+  const user = resolvedCode ? municipalities[resolvedCode] : null;
   if (!user) {
     return reply.code(401).send({ message: "Invalid municipality code" });
   }
+  const loginCode: string = resolvedCode;
 
-  reply.setCookie("municipalityCode", municipalityCode, sessionCookieOptions);
-  return { municipality: { code: municipalityCode, name: user.name } };
+  reply.setCookie("municipalityCode", loginCode, sessionCookieOptions);
+  return { municipality: { code: loginCode, name: user.name } };
 });
 
 app.post("/api/auth/logout", async (_request, reply) => {
   reply.clearCookie("municipalityCode", { path: "/" });
   return { success: true };
+});
+
+app.post<{
+  Body: {
+    inputPdfPath: string;
+    outDir?: string;
+    policiesOutPath?: string;
+    municipalityCode?: string;
+    municipalityName?: string;
+    idPrefix: string;
+    mergeToPoliciesJson?: boolean;
+  };
+}>("/api/admin/import-pdf", async (request, reply) => {
+  const session = requireSession(request, reply);
+  if (!session) return;
+
+  const {
+    inputPdfPath,
+    outDir,
+    policiesOutPath,
+    municipalityCode,
+    municipalityName,
+    idPrefix,
+    mergeToPoliciesJson
+  } = request.body;
+
+  if (!inputPdfPath || !idPrefix) {
+    return reply.code(400).send({ message: "inputPdfPath and idPrefix are required" });
+  }
+
+  const targetCode = municipalityCode ?? session.code;
+  const targetName =
+    municipalityName ??
+    municipalityMasterByCode[targetCode]?.municipalityDisplayName ??
+    municipalities[targetCode]?.name ??
+    session.name;
+
+  const safeDirCode = targetCode.replace(/[^\dA-Za-z_-]/g, "");
+  const defaultOutDir = `data/policies-pdf/${safeDirCode || "imported"}`;
+  const defaultPoliciesOutPath = `data/policies.${safeDirCode || "imported"}.json`;
+
+  try {
+    const result = await importPoliciesFromPdf({
+      rootDir,
+      inputPdfPath,
+      outDir: outDir ?? defaultOutDir,
+      policiesOutPath: policiesOutPath ?? defaultPoliciesOutPath,
+      municipalityCode: targetCode,
+      municipalityName: targetName,
+      idPrefix,
+      mergeToPoliciesJson
+    });
+    return { success: true, result };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Import failed";
+    return reply.code(400).send({ message });
+  }
+});
+
+app.post("/api/admin/import-pdf/upload/preview", async (request, reply) => {
+  const session = requireSession(request, reply);
+  if (!session) return;
+
+  cleanupOldPendingImports();
+
+  let uploadedBuffer: Buffer | null = null;
+  let uploadedFileName = "uploaded.pdf";
+  const fields: Record<string, string> = {};
+
+  for await (const part of request.parts()) {
+    if (part.type === "file") {
+      uploadedFileName = part.filename || uploadedFileName;
+      uploadedBuffer = await part.toBuffer();
+    } else {
+      fields[part.fieldname] = String(part.value ?? "");
+    }
+  }
+
+  if (!uploadedBuffer) {
+    return reply.code(400).send({ message: "PDF file is required" });
+  }
+
+  const idPrefix = (fields.idPrefix ?? "").trim();
+  if (!idPrefix) {
+    return reply.code(400).send({ message: "idPrefix is required" });
+  }
+
+  const targetCode = (fields.municipalityCode ?? "").trim() || session.code;
+  const targetName =
+    (fields.municipalityName ?? "").trim() ||
+    municipalityMasterByCode[targetCode]?.municipalityDisplayName ||
+    municipalities[targetCode]?.name ||
+    session.name;
+
+  const safeDirCode = targetCode.replace(/[^\dA-Za-z_-]/g, "");
+  const outDir = (fields.outDir ?? "").trim() || `data/policies-pdf/${safeDirCode || "imported"}`;
+  const policiesOutPath = (fields.policiesOutPath ?? "").trim() || `data/policies.${safeDirCode || "imported"}.json`;
+  const mergeToPoliciesJson = (fields.mergeToPoliciesJson ?? "true").toLowerCase() !== "false";
+
+  mkdirSync(uploadTempDir, { recursive: true });
+  const safeBase = uploadedFileName.replace(/[^A-Za-z0-9._-]/g, "_");
+  const tempFileName = `${Date.now()}-${safeBase}`;
+  const tempAbsPath = resolve(uploadTempDir, tempFileName);
+  const tempRelativePath = `data/uploads/${tempFileName}`;
+  writeFileSync(tempAbsPath, uploadedBuffer);
+
+  try {
+    const preview = await importPoliciesFromPdf({
+      rootDir,
+      inputPdfPath: tempRelativePath,
+      outDir,
+      policiesOutPath,
+      municipalityCode: targetCode,
+      municipalityName: targetName,
+      idPrefix,
+      mergeToPoliciesJson,
+      dryRun: true
+    });
+
+    const token = randomUUID();
+    pendingImports.set(token, {
+      tempAbsPath,
+      tempRelativePath,
+      municipalityCode: targetCode,
+      municipalityName: targetName,
+      idPrefix,
+      outDir,
+      policiesOutPath,
+      mergeToPoliciesJson,
+      createdAt: Date.now()
+    });
+
+    return {
+      success: true,
+      token,
+      preview
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Import failed";
+    try {
+      if (existsSync(tempAbsPath)) unlinkSync(tempAbsPath);
+    } catch {
+      // no-op
+    }
+    return reply.code(400).send({ message });
+  }
+});
+
+app.post<{ Body: { token: string; selectedIds?: string[] } }>("/api/admin/import-pdf/upload/confirm", async (request, reply) => {
+  const session = requireSession(request, reply);
+  if (!session) return;
+
+  cleanupOldPendingImports();
+  const token = (request.body.token ?? "").trim();
+  const selectedIds = Array.isArray(request.body.selectedIds)
+    ? request.body.selectedIds.map((v) => String(v)).filter((v) => v.length > 0)
+    : undefined;
+  if (!token) {
+    return reply.code(400).send({ message: "token is required" });
+  }
+
+  const pending = pendingImports.get(token);
+  if (!pending) {
+    return reply.code(404).send({ message: "Preview token not found or expired" });
+  }
+
+  try {
+    const result = await importPoliciesFromPdf({
+      rootDir,
+      inputPdfPath: pending.tempRelativePath,
+      outDir: pending.outDir,
+      policiesOutPath: pending.policiesOutPath,
+      municipalityCode: pending.municipalityCode,
+      municipalityName: pending.municipalityName,
+      idPrefix: pending.idPrefix,
+      mergeToPoliciesJson: pending.mergeToPoliciesJson,
+      selectedIds
+    });
+    const latestRaw = readJsonWithFallback<RawPolicy[]>("policies.json", "policies.sample.json");
+    policies = latestRaw.map(toPolicy);
+    return { success: true, result };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Import failed";
+    return reply.code(400).send({ message });
+  } finally {
+    pendingImports.delete(token);
+    try {
+      if (existsSync(pending.tempAbsPath)) unlinkSync(pending.tempAbsPath);
+    } catch {
+      // no-op
+    }
+  }
+});
+
+app.post<{ Body: { policyIds: string[] } }>("/api/admin/policies/delete", async (request, reply) => {
+  const session = requireSession(request, reply);
+  if (!session) return;
+
+  const ids = Array.isArray(request.body.policyIds)
+    ? request.body.policyIds.map((v) => String(v)).filter((v) => v.length > 0)
+    : [];
+  if (ids.length === 0) {
+    return reply.code(400).send({ message: "policyIds is required" });
+  }
+
+  const policiesPath = resolve(dataDir, "policies.json");
+  const currentRaw = readJsonWithFallback<RawPolicy[]>("policies.json", "policies.sample.json");
+  const idSet = new Set(ids);
+  const toDelete = currentRaw.filter((p) => idSet.has(p.id));
+  const kept = currentRaw.filter((p) => !idSet.has(p.id));
+
+  toDelete.forEach((item) => {
+    const normalized = normalizePdfPath(item.pdfPath);
+    if (!normalized) return;
+    const abs = resolve(policiesPdfDir, normalized);
+    if (existsSync(abs)) {
+      try {
+        unlinkSync(abs);
+      } catch {
+        // no-op
+      }
+    }
+  });
+
+  writeFileSync(policiesPath, `${JSON.stringify(kept, null, 2)}\n`, "utf-8");
+  policies = kept.map(toPolicy);
+  return { success: true, deletedCount: toDelete.length };
 });
 
 app.get("/api/me", async (request, reply) => {

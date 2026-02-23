@@ -28,6 +28,33 @@ export type Policy = {
   pdfUrl?: string;
 };
 
+export type ImportPdfRequest = {
+  inputPdfPath: string;
+  idPrefix: string;
+  outDir?: string;
+  policiesOutPath?: string;
+  municipalityCode?: string;
+  municipalityName?: string;
+  mergeToPoliciesJson?: boolean;
+};
+
+export type ImportPdfUploadPayload = {
+  idPrefix: string;
+  outDir?: string;
+  policiesOutPath?: string;
+  municipalityCode?: string;
+  municipalityName?: string;
+  mergeToPoliciesJson?: boolean;
+};
+
+export type ImportPdfPreviewItem = {
+  id: string;
+  title: string;
+  startPage: number;
+  endPage: number;
+  pageCount: number;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -77,5 +104,80 @@ export const api = {
     request<{ top5Cities: TwinCity[]; similarCities?: TwinCity[]; worstCities?: TwinCity[]; policies: Policy[] }>(
       `/api/search?keyword=${encodeURIComponent(keyword)}`
     ),
+  importPdf: (payload: ImportPdfRequest) =>
+    request<{
+      success: boolean;
+      result: {
+        pageCount: number;
+        segmentCount: number;
+        outDir: string;
+        policiesOutPath: string;
+        mergedPoliciesPath?: string;
+        mergedAdded?: number;
+      };
+    }>("/api/admin/import-pdf", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  importPdfUploadPreview: async (file: File, payload: ImportPdfUploadPayload) => {
+    const form = new FormData();
+    form.append("pdf", file);
+    form.append("idPrefix", payload.idPrefix);
+    if (payload.outDir) form.append("outDir", payload.outDir);
+    if (payload.policiesOutPath) form.append("policiesOutPath", payload.policiesOutPath);
+    if (payload.municipalityCode) form.append("municipalityCode", payload.municipalityCode);
+    if (payload.municipalityName) form.append("municipalityName", payload.municipalityName);
+    if (payload.mergeToPoliciesJson !== undefined) {
+      form.append("mergeToPoliciesJson", String(payload.mergeToPoliciesJson));
+    }
+
+    const response = await fetch(`${API_BASE}/api/admin/import-pdf/upload/preview`, {
+      method: "POST",
+      credentials: "include",
+      body: form
+    });
+    if (!response.ok) {
+      let message = "Request failed";
+      try {
+        const payloadJson = (await response.json()) as { message?: string };
+        if (payloadJson.message) message = payloadJson.message;
+      } catch {
+        // Keep generic message.
+      }
+      throw new Error(message);
+    }
+
+    return (await response.json()) as {
+      success: boolean;
+      token: string;
+      preview: {
+        pageCount: number;
+        segmentCount: number;
+        outDir: string;
+        policiesOutPath: string;
+        previewItems: ImportPdfPreviewItem[];
+      };
+    };
+  },
+  confirmImportPdfUpload: (token: string, selectedIds?: string[]) =>
+    request<{
+      success: boolean;
+      result: {
+        pageCount: number;
+        segmentCount: number;
+        outDir: string;
+        policiesOutPath: string;
+        mergedPoliciesPath?: string;
+        mergedAdded?: number;
+      };
+    }>("/api/admin/import-pdf/upload/confirm", {
+      method: "POST",
+      body: JSON.stringify({ token, selectedIds })
+    }),
+  deletePolicies: (policyIds: string[]) =>
+    request<{ success: boolean; deletedCount: number }>("/api/admin/policies/delete", {
+      method: "POST",
+      body: JSON.stringify({ policyIds })
+    }),
   policy: (policyId: string) => request<{ policy: Policy }>(`/api/policies/${policyId}`)
 };

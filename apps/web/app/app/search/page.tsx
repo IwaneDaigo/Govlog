@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
+import NextLink from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Box,
@@ -10,6 +11,7 @@ import {
   Heading,
   HStack,
   Input,
+  Link,
   Stack,
   Text
 } from "@chakra-ui/react";
@@ -70,6 +72,16 @@ export default function SearchPage() {
             検索
           </Button>
         </form>
+      </Box>
+
+      <Box rounded="2xl" bg="white" p={6} shadow="sm" borderWidth="1px">
+        <Heading size="sm">管理機能</Heading>
+        <Text mt={2} fontSize="sm" color="gray.600">
+          行政評価シートPDFの分割・抽出・施策データ反映を実行します。
+        </Text>
+        <Link as={NextLink} href="/app/import" color="blue.600" fontWeight="semibold" mt={3} display="inline-block">
+          施策PDF取り込みを開く
+        </Link>
       </Box>
     </Stack>
   );
