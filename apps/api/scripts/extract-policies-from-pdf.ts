@@ -30,6 +30,7 @@ const PERIOD_LABEL = "\u3010\u4e8b\u696d\u5b9f\u65bd\u671f\u9593\u3011"; // 【�
 const MUNICIPALITY_NAME_DEFAULT = "\u4eac\u90fd\u5e9c\u4eac\u90fd\u5e02"; // 京都府京都市
 const FALLBACK_TITLE_PREFIX = "\u4e8b\u696d"; // 事業
 const JIMU_LABEL = "\u4e8b\u52d9\u4e8b\u696d\u540d"; // 事務事業名
+const SHEET_LABEL = "\u4e8b\u52d9\u4e8b\u696d\u8a55\u4fa1\u30b7\u30fc\u30c8"; // 事務事業評価シート
 
 const getArg = (name: string, fallback?: string): string => {
   const index = process.argv.findIndex((arg) => arg === `--${name}`);
@@ -189,6 +190,7 @@ const run = async (): Promise<void> => {
 
   const segments: Segment[] = [];
   let current: Segment | null = null;
+  let autoNo = 0;
   const isHeaderLikeTitle = (value: string): boolean =>
     /事業概要|取組実績|経費（一財）|令和６年度\）\s*１/.test(value);
 
@@ -202,22 +204,35 @@ const run = async (): Promise<void> => {
     }));
     const text = normalizeText(pageItems.map((item) => item.str).join(" "));
     const no = extractNoFromItems(pageItems) ?? extractNo(text);
-    if (!no) continue;
-
     const title = extractTitleFromItems(pageItems) ?? extractTitleFromText(text);
+    const isBasicPageLike =
+      text.includes(SHEET_LABEL) &&
+      text.includes(JIMU_LABEL) &&
+      !text.includes("\u226a\u4e8b\u696d\u5b9f\u7e3e\u7b49\u226b") &&
+      !text.includes("\u226a\u53d6\u7d44\u72b6\u6cc1\u226b");
 
-    if (!current || current.no !== no) {
+    let startKey: string | null = null;
+    if (no) {
+      startKey = no;
+    } else if (isBasicPageLike && title) {
+      autoNo += 1;
+      startKey = String(autoNo);
+    }
+
+    if (startKey && (!current || current.no !== startKey)) {
       if (current) segments.push(current);
-      current = { no, startPage: pageNumber, endPage: pageNumber, title };
+      current = { no: startKey, startPage: pageNumber, endPage: pageNumber, title };
       continue;
     }
 
-    current.endPage = pageNumber;
-    if (title) {
-      if (!current.title) {
-        current.title = title;
-      } else if (isHeaderLikeTitle(current.title) && !isHeaderLikeTitle(title)) {
-        current.title = title;
+    if (current) {
+      current.endPage = pageNumber;
+      if (title) {
+        if (!current.title) {
+          current.title = title;
+        } else if (isHeaderLikeTitle(current.title) && !isHeaderLikeTitle(title)) {
+          current.title = title;
+        }
       }
     }
   }
