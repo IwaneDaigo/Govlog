@@ -156,6 +156,7 @@ export const api = {
         outDir: string;
         policiesOutPath: string;
         previewItems: ImportPdfPreviewItem[];
+        mlPredictionUsed: boolean;
       };
     };
   },
@@ -169,6 +170,7 @@ export const api = {
         policiesOutPath: string;
         mergedPoliciesPath?: string;
         mergedAdded?: number;
+        mlPredictionUsed: boolean;
       };
     }>("/api/admin/import-pdf/upload/confirm", {
       method: "POST",

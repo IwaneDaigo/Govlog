@@ -44,6 +44,7 @@ export default function ImportPdfPage() {
   const [previewItems, setPreviewItems] = useState<ImportPdfPreviewItem[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [previewMeta, setPreviewMeta] = useState<{ pageCount: number; segmentCount: number } | null>(null);
+  const [mlUsed, setMlUsed] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -95,6 +96,7 @@ export default function ImportPdfPage() {
     setPreviewItems([]);
     setSelectedIds([]);
     setPreviewMeta(null);
+    setMlUsed(false);
 
     try {
       const res = await api.importPdfUploadPreview(selectedFile, {
@@ -111,6 +113,7 @@ export default function ImportPdfPage() {
         pageCount: res.preview.pageCount,
         segmentCount: res.preview.segmentCount
       });
+      setMlUsed(Boolean(res.preview.mlPredictionUsed));
       setMessage("プレビュー生成が完了しました。誤りがある項目は除外してから確定実行してください。");
     } catch (e) {
       setError(e instanceof Error ? e.message : "プレビュー生成に失敗しました。");
@@ -222,6 +225,11 @@ export default function ImportPdfPage() {
               {selectedIds.length}/{previewMeta.segmentCount} 件選択
             </Badge>
           </HStack>
+          {mlUsed ? (
+            <Text mb={3} fontSize="sm" color="purple.600">
+              ML判定を利用して開始ページを補完しました（ルールで判別不能なページ）。
+            </Text>
+          ) : null}
           <HStack mb={3}>
             <Button size="sm" variant="outline" onClick={selectAll}>
               全選択
@@ -284,4 +292,3 @@ export default function ImportPdfPage() {
     </Stack>
   );
 }
-

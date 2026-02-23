@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+﻿import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { PDFDocument } from "pdf-lib";
+import { predictStartPages } from "./pdf-start-ml";
 
 type PageTextItem = {
   str: string;
@@ -55,6 +56,7 @@ export type ImportPdfResult = {
   mergedPoliciesPath?: string;
   mergedAdded?: number;
   previewItems: ImportPdfPreviewItem[];
+  mlPredictionUsed: boolean;
 };
 
 const SHEET_LABEL = "\u4e8b\u52d9\u4e8b\u696d\u8a55\u4fa1\u30b7\u30fc\u30c8";
@@ -95,11 +97,63 @@ const extractTitleFromItems = (items: PageTextItem[]): string | undefined => {
   const candidates = normalized
     .filter((i) => i.x > label.x + 20 && Math.abs(i.y - label.y) <= 4)
     .map((i) => i.t)
-    .filter((t) => !/^[:：]$/.test(t));
+    .filter((t) => !/^[:\uff1a\-\u30fb\s]+$/.test(t));
 
   if (candidates.length === 0) return undefined;
   const joined = normalizeText(candidates.join(" "));
   return joined || undefined;
+};
+
+const cleanupBusinessName = (value: string): string | undefined => {
+  const cleaned = normalizeText(value)
+    .replace(/^[:\uff1a\-\u30fb\s]+/, "")
+    .replace(/\s*(?:\u4e8b\u696d\u306e\u76ee\u7684|\u4e8b\u696d\u76ee\u7684|\u6240\u5c5e|\u62c5\u5f53|\u4e88\u7b97|\u8a55\u4fa1|\u6210\u679c\u6307\u6a19|\u6307\u6a19).*$/, "")
+    .trim();
+
+  if (!cleaned) return undefined;
+  if (cleaned.length > 120) return undefined;
+  return cleaned;
+};
+
+const hasReiwaBusinessHeader = (text: string): boolean => /\u4ee4\u548c[6\uff16]\u5e74\u5ea6\s*\u4e8b\u696d\u540d/.test(text);
+
+const extractBusinessNameFromItems = (items: PageTextItem[]): string | undefined => {
+  const normalized = items
+    .map((i) => ({ ...i, t: i.str.trim() }))
+    .filter((i) => i.t.length > 0)
+    .sort((a, b) => b.y - a.y || a.x - b.x);
+
+  const header = normalized.find((i) => /\u4ee4\u548c[6\uff16]\u5e74\u5ea6\s*\u4e8b\u696d\u540d/.test(i.t));
+  if (!header) return undefined;
+
+  const lineItems = normalized
+    .filter((i) => Math.abs(i.y - header.y) <= 3 && i.x > header.x)
+    .sort((a, b) => a.x - b.x);
+
+  const tokens: string[] = [];
+  for (const item of lineItems) {
+    if (/^(?:\u6b73\u51fa\u4e88\u7b97\u79d1\u76ee|\u6240\u7ba1\u533a\u5c40\u30fb\u8ab2|\u6240\u7ba1\u533a\u5c40|\u8a55\u4fa1\u66f8\u756a\u53f7|\u4e8b\u696d\u6982\u8981)$/.test(item.t)) {
+      break;
+    }
+    tokens.push(item.t);
+  }
+
+  return cleanupBusinessName(tokens.join(" "));
+};
+
+const extractBusinessNameFromText = (text: string): string | undefined => {
+  const patterns = [
+    /\u4ee4\u548c[6\uff16]\u5e74\u5ea6\s*\u4e8b\u696d\u540d\s*[:\uff1a]?\s*(.+?)(?=\s*(?:\u6b73\u51fa\u4e88\u7b97\u79d1\u76ee|\u6240\u7ba1\u533a\u5c40\u30fb\u8ab2|\u4e8b\u696d\u6982\u8981|$))/
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const name = cleanupBusinessName(match[1]);
+    if (name) return name;
+  }
+
+  return undefined;
 };
 
 const upsertPolicies = (base: PolicyOutput[], incoming: PolicyOutput[]): { merged: PolicyOutput[]; added: number } => {
@@ -127,12 +181,18 @@ export const importPoliciesFromPdf = async (options: ImportPdfOptions): Promise<
 
   const data = new Uint8Array(sourceBytes);
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const doc = await pdfjs.getDocument({ data, disableWorker: true } as unknown as Parameters<typeof pdfjs.getDocument>[0])
-    .promise;
+  const doc = await pdfjs.getDocument({ data, disableWorker: true } as unknown as Parameters<typeof pdfjs.getDocument>[0]).promise;
 
   const segments: Segment[] = [];
   let current: Segment | null = null;
   let autoNo = 0;
+
+  const pageTexts: string[] = [];
+  const pageTitles: Array<string | undefined> = [];
+  const pageBusinessNames: Array<string | undefined> = [];
+  const pageHasBusinessHeader: boolean[] = [];
+  const pageNos: Array<string | null> = [];
+  const pageBasicFlags: boolean[] = [];
 
   for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
     const page = await doc.getPage(pageNumber);
@@ -150,34 +210,98 @@ export const importPoliciesFromPdf = async (options: ImportPdfOptions): Promise<
 
     const text = normalizeText(pageItems.map((item) => item.str).join(" "));
     const no = extractNoFromItems(pageItems) ?? extractNo(text);
-    const title = extractTitleFromItems(pageItems);
+    const businessName = extractBusinessNameFromItems(pageItems) ?? extractBusinessNameFromText(text);
+    const title = businessName ?? extractTitleFromItems(pageItems);
     const isBasicPageLike =
       text.includes(SHEET_LABEL) &&
       text.includes(JIMU_LABEL) &&
       !text.includes(DETAIL_SECTION_LABEL) &&
       !text.includes(STATUS_SECTION_LABEL);
 
+    pageTexts.push(text);
+    pageNos.push(no);
+    pageTitles.push(title);
+    pageBusinessNames.push(businessName);
+    pageHasBusinessHeader.push(hasReiwaBusinessHeader(text));
+    pageBasicFlags.push(isBasicPageLike);
+  }
+
+  const mlPredictions = await predictStartPages(options.rootDir, pageTexts);
+  let mlUsed = false;
+  let lastBusinessName: string | null = null;
+
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    const no = pageNos[pageNumber - 1];
+    const title = pageTitles[pageNumber - 1];
+    const businessName = pageBusinessNames[pageNumber - 1];
+    const hasBusinessHeader = pageHasBusinessHeader[pageNumber - 1];
+    const isBasicPageLike = pageBasicFlags[pageNumber - 1];
+    const mlStart = mlPredictions?.[pageNumber - 1]?.isStart ?? false;
+
     let startKey: string | null = null;
-    if (no) {
-      startKey = no;
-    } else if (isBasicPageLike && title) {
+    if (hasBusinessHeader) {
       autoNo += 1;
       startKey = String(autoNo);
+      if (businessName) lastBusinessName = businessName;
+    } else if (businessName && businessName !== lastBusinessName) {
+      autoNo += 1;
+      startKey = String(autoNo);
+      lastBusinessName = businessName;
+    } else if (no) {
+      startKey = no;
+    } else if (mlStart || (isBasicPageLike && title)) {
+      autoNo += 1;
+      startKey = String(autoNo);
+      if (mlStart) mlUsed = true;
     }
 
     if (startKey && (!current || current.no !== startKey)) {
       if (current) segments.push(current);
-      current = { no: startKey, startPage: pageNumber, endPage: pageNumber, title };
+      current = { no: startKey, startPage: pageNumber, endPage: pageNumber, title: businessName ?? title };
       continue;
     }
 
     if (current) {
       current.endPage = pageNumber;
-      if (title && !current.title) current.title = title;
+      if ((businessName ?? title) && !current.title) current.title = businessName ?? title;
     }
   }
 
   if (current) segments.push(current);
+
+  if (segments.length === 0 && mlPredictions) {
+    const startPages = mlPredictions
+      .map((pred, idx) => ({ page: idx + 1, p: pred.probability }))
+      .filter((item) => item.p >= 0.5)
+      .map((item) => item.page);
+
+    if (startPages.length === 0 || startPages[0] !== 1) {
+      startPages.unshift(1);
+    }
+
+    const uniqueStartPages = [...new Set(startPages)].sort((a, b) => a - b);
+    for (let i = 0; i < uniqueStartPages.length; i += 1) {
+      const startPage = uniqueStartPages[i];
+      const endPage = i + 1 < uniqueStartPages.length ? uniqueStartPages[i + 1] - 1 : pageCount;
+      if (endPage < startPage) continue;
+      const no = String(i + 1);
+      const title = pageBusinessNames[startPage - 1] ?? pageTitles[startPage - 1];
+      segments.push({ no, startPage, endPage, title });
+    }
+    mlUsed = true;
+  }
+
+  if (segments.length === 0) {
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      segments.push({
+        no: String(pageNumber),
+        startPage: pageNumber,
+        endPage: pageNumber,
+        title: pageBusinessNames[pageNumber - 1] ?? pageTitles[pageNumber - 1]
+      });
+    }
+  }
+
   if (segments.length === 0) {
     throw new Error("No business segments found. Check PDF format.");
   }
@@ -205,9 +329,7 @@ export const importPoliciesFromPdf = async (options: ImportPdfOptions): Promise<
       pageCount: segment.endPage - segment.startPage + 1
     });
 
-    if (selectedIdSet && !selectedIdSet.has(id)) {
-      continue;
-    }
+    if (selectedIdSet && !selectedIdSet.has(id)) continue;
 
     if (!options.dryRun) {
       const splitPdf = await PDFDocument.create();
@@ -239,7 +361,8 @@ export const importPoliciesFromPdf = async (options: ImportPdfOptions): Promise<
     segmentCount: policies.length,
     outDir: outDirAbs,
     policiesOutPath: policiesOutAbs,
-    previewItems
+    previewItems,
+    mlPredictionUsed: mlUsed
   };
 
   if (!options.dryRun && options.mergeToPoliciesJson !== false) {

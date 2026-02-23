@@ -56,8 +56,8 @@ type MunicipalityMasterItem = {
 const rootDir = resolve(__dirname, "../../../");
 const dataDir = resolve(rootDir, "data");
 const policiesPdfDir = resolve(dataDir, "policies-pdf");
-const similarityApiBaseUrl = process.env.SIMILARITY_API_BASE_URL?.trim();
-const similarityClient = similarityApiBaseUrl ? new SimilarityClient(similarityApiBaseUrl) : null;
+const similarityApiBaseUrl = process.env.SIMILARITY_API_BASE_URL?.trim() || "http://127.0.0.1:8000";
+const similarityClient = new SimilarityClient(similarityApiBaseUrl);
 const uploadTempDir = resolve(rootDir, "data/uploads");
 
 type PendingImport = {
@@ -328,9 +328,68 @@ const buildSimilarCitiesFromSimilarity = async (
         score: result.scores?.[code] ?? 0
       };
     });
-  } catch {
+  } catch (error) {
+    app.log.warn(
+      {
+        err: error,
+        baseCode: normalizedBaseCode,
+        candidateCount: candidateCodes.length
+      },
+      "Similarity API call failed. Falling back to local ranking."
+    );
     return null;
   }
+};
+
+const buildFallbackSimilarCities = (
+  baseCode: string,
+  keyword: string,
+  limit = 20
+): TwinCity[] => {
+  const normalizedBase = normalizeToCdArea(baseCode) ?? baseCode;
+  const twinsFallback = twins[baseCode] ?? twins[normalizedBase] ?? [];
+  if (twinsFallback.length > 0) {
+    return twinsFallback.slice(0, limit);
+  }
+
+  const keywordLc = keyword.trim().toLowerCase();
+  const policyCountByCode = new Map<string, number>();
+  for (const policy of policies) {
+    const code = normalizeToCdArea(policy.municipalityCode) ?? policy.municipalityCode;
+    if (code === normalizedBase) continue;
+    if (keywordLc) {
+      const haystack = `${policy.title} ${policy.summary} ${policy.details} ${policy.keywords.join(" ")}`.toLowerCase();
+      if (!haystack.includes(keywordLc)) continue;
+    }
+    policyCountByCode.set(code, (policyCountByCode.get(code) ?? 0) + 1);
+  }
+
+  const candidates = Array.from(
+    new Set(
+      Object.keys(municipalities)
+        .map((code) => normalizeToCdArea(code) ?? code)
+        .filter((code) => code !== normalizedBase)
+    )
+  );
+
+  candidates.sort((a, b) => {
+    const aCount = policyCountByCode.get(a) ?? 0;
+    const bCount = policyCountByCode.get(b) ?? 0;
+    if (aCount !== bCount) return bCount - aCount;
+    return a.localeCompare(b);
+  });
+
+  return candidates.slice(0, limit).map((code) => {
+    const masterName = municipalityMasterByCode[code]?.municipalityDisplayName ?? municipalityMasterByCode[code]?.municipalityName;
+    const localName =
+      municipalities[code]?.name ??
+      Object.entries(municipalities).find(([rawCode]) => (normalizeToCdArea(rawCode) ?? rawCode) === code)?.[1].name;
+    return {
+      municipalityCode: code,
+      municipalityName: masterName ?? localName ?? code,
+      score: 0
+    };
+  });
 };
 
 app.post<{ Body: { municipalityCode: string } }>("/api/auth/login", async (request, reply) => {
@@ -630,7 +689,7 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   const rawKeyword = (request.query.keyword ?? "").trim();
   const keyword = rawKeyword.toLowerCase();
   const similarCitiesFromSimilarity = await buildSimilarCitiesFromSimilarity(municipality.code, rawKeyword);
-  const similarCities = similarCitiesFromSimilarity ?? (twins[municipality.code] ?? []).slice(0, 5);
+  const similarCities = similarCitiesFromSimilarity ?? buildFallbackSimilarCities(municipality.code, rawKeyword, 20);
   const top5Cities = similarCities.slice(0, 5);
   const worstCities = similarCities.length > 20 ? [...similarCities].slice(-20).reverse() : [...similarCities].reverse();
   const top5Set = new Set(top5Cities.map((city) => normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode));
@@ -685,6 +744,7 @@ app.get("/api/health", async () => ({ status: "ok" }));
 const start = async () => {
   try {
     await app.listen({ port: 4000, host: "0.0.0.0" });
+    app.log.info({ similarityApiBaseUrl }, "Similarity API base URL");
     if (!existsSync(policiesPdfDir)) {
       app.log.warn({ path: policiesPdfDir }, "PDF directory not found. Create data/policies-pdf to serve split PDFs.");
     }
