@@ -1,0 +1,23 @@
+{
+  "131016": [
+    { "municipalityCode": "271004", "municipalityName": "大阪府大阪市", "score": 0.95 },
+    { "municipalityCode": "011002", "municipalityName": "北海道札幌市", "score": 0.93 },
+    { "municipalityCode": "141305", "municipalityName": "神奈川県川崎市", "score": 0.90 },
+    { "municipalityCode": "231002", "municipalityName": "愛知県名古屋市", "score": 0.88 },
+    { "municipalityCode": "341002", "municipalityName": "広島県広島市", "score": 0.86 }
+  ],
+  "271004": [
+    { "municipalityCode": "131016", "municipalityName": "東京都千代田区", "score": 0.95 },
+    { "municipalityCode": "231002", "municipalityName": "愛知県名古屋市", "score": 0.92 },
+    { "municipalityCode": "141305", "municipalityName": "神奈川県川崎市", "score": 0.89 },
+    { "municipalityCode": "011002", "municipalityName": "北海道札幌市", "score": 0.87 },
+    { "municipalityCode": "341002", "municipalityName": "広島県広島市", "score": 0.84 }
+  ],
+  "011002": [
+    { "municipalityCode": "131016", "municipalityName": "東京都千代田区", "score": 0.93 },
+    { "municipalityCode": "271004", "municipalityName": "大阪府大阪市", "score": 0.87 },
+    { "municipalityCode": "341002", "municipalityName": "広島県広島市", "score": 0.86 },
+    { "municipalityCode": "231002", "municipalityName": "愛知県名古屋市", "score": 0.84 },
+    { "municipalityCode": "141305", "municipalityName": "神奈川県川崎市", "score": 0.83 }
+  ]
+}

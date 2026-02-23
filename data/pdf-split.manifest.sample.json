@@ -1,0 +1,20 @@
+[
+  {
+    "id": "cityA-001",
+    "title": "事業A",
+    "municipalityCode": "131016",
+    "municipalityName": "東京都千代田区",
+    "startPage": 1,
+    "endPage": 2,
+    "keywords": ["福祉"]
+  },
+  {
+    "id": "cityA-002",
+    "title": "事業B",
+    "municipalityCode": "131016",
+    "municipalityName": "東京都千代田区",
+    "startPage": 3,
+    "endPage": 4,
+    "keywords": ["防災"]
+  }
+]

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "p-001",
+    "municipalityCode": "271004",
+    "municipalityName": "大阪府大阪市",
+    "title": "子育て支援アプリの統合",
+    "summary": "詳細はPDFで確認してください。",
+    "details": "",
+    "keywords": ["子育て", "DX", "アプリ"],
+    "pdfPath": "p-001.pdf"
+  },
+  {
+    "id": "p-002",
+    "municipalityCode": "011002",
+    "municipalityName": "北海道札幌市",
+    "title": "地域防災データ連携基盤",
+    "summary": "詳細はPDFで確認してください。",
+    "details": "",
+    "keywords": ["防災", "データ連携", "危機管理"],
+    "pdfPath": "p-002.pdf"
+  },
+  {
+    "id": "p-003",
+    "municipalityCode": "131016",
+    "municipalityName": "東京都千代田区",
+    "title": "高齢者見守りIoT実証",
+    "summary": "詳細はPDFで確認してください。",
+    "details": "",
+    "keywords": ["高齢者", "見守り", "IoT"],
+    "pdfPath": "p-003.pdf"
+  },
+  {
+    "id": "p-004",
+    "municipalityCode": "141305",
+    "municipalityName": "神奈川県川崎市",
+    "title": "公共施設予約のオンライン化",
+    "summary": "詳細はPDFで確認してください。",
+    "details": "",
+    "keywords": ["DX", "予約", "公共施設"],
+    "pdfPath": "p-004.pdf"
+  },
+  {
+    "id": "p-005",
+    "municipalityCode": "231002",
+    "municipalityName": "愛知県名古屋市",
+    "title": "スタートアップ連携の実証補助",
+    "summary": "詳細はPDFで確認してください。",
+    "details": "",
+    "keywords": ["産業振興", "スタートアップ", "公募"],
+    "pdfPath": "p-005.pdf"
+  },
+  {
+    "id": "p-006",
+    "municipalityCode": "341002",
+    "municipalityName": "広島県広島市",
+    "title": "多言語窓口支援チャット導入",
+    "summary": "詳細はPDFで確認してください。",
+    "details": "",
+    "keywords": ["多文化共生", "チャット", "窓口"],
+    "pdfPath": "p-006.pdf"
+  }
+]
