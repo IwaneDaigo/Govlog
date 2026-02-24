@@ -455,6 +455,8 @@ const buildFallbackSimilarCities = (
     )
   );
 
+  const maxCount = Math.max(...Array.from(policyCountByCode.values()), 0);
+
   candidates.sort((a, b) => {
     const aCount = policyCountByCode.get(a) ?? 0;
     const bCount = policyCountByCode.get(b) ?? 0;
@@ -467,10 +469,13 @@ const buildFallbackSimilarCities = (
     const localName =
       municipalities[code]?.name ??
       Object.entries(municipalities).find(([rawCode]) => (normalizeToCdArea(rawCode) ?? rawCode) === code)?.[1].name;
+    const count = policyCountByCode.get(code) ?? 0;
+    const score = maxCount > 0 ? count / maxCount : 0;
+
     return {
       municipalityCode: code,
       municipalityName: masterName ?? localName ?? code,
-      score: 0
+      score
     };
   });
 };
@@ -529,6 +534,7 @@ const validateReviewItems = (value: unknown): value is ProposalReviewItem[] => {
             && obj.evidenceText.trim().length > 0;
     });
 };
+
 
 const buildReviewPrompt = (
     proposalDraft: ProposalDraft,
@@ -876,7 +882,7 @@ const buildFallbackReviewResponse = (
     const strongMatches = evidenceByItem.slice(0, 3);
     const weakMatches = evidenceByItem.slice(-3).reverse();
 
-    const missingFields: Array<{ key: keyof ProposalDraft; label: string }> = [
+    const fieldCandidates: Array<{ key: keyof ProposalDraft; label: string }> = [
         { key: "purpose", label: "目的" },
         { key: "target", label: "対象" },
         { key: "content", label: "施策内容" },
@@ -884,8 +890,10 @@ const buildFallbackReviewResponse = (
         { key: "budget", label: "予算" },
         { key: "period", label: "期間" },
         { key: "evidence", label: "根拠" }
-    ].filter((field) => {
-        const value = proposalDraft[field.key]?.trim() ?? "";
+    ];
+
+    const missingFields = fieldCandidates.filter((field) => {
+        const value = proposalDraft[field.key].trim();
         return value.length < 6 || value.includes("未定");
     });
 
@@ -1587,4 +1595,5 @@ const start = async () => {
 };
 
 void start();
+
 
