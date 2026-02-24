@@ -61,9 +61,6 @@ export default function ProposalPage() {
 
     useEffect(() => {
         if (!municipality) return;
-        if (!title) {
-            setTitle(`${municipality.name} 企画書`);
-        }
     }, [municipality, title]);
 
     useEffect(() => {

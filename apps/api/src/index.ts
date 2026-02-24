@@ -510,6 +510,31 @@ const extractEvidenceSnippet = (policy: Policy, keyword: string): string => {
     const end = Math.min(haystack.length, idx + 120);
     return haystack.slice(start, end);
 };
+const tokenizeForSimilarity = (text: string): string[] =>
+    text
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, " ")
+        .split(/\s+/)
+        .filter((token) => token.length >= 2);
+
+const calcTextSimilarity = (left: string, right: string): number => {
+    const leftSet = new Set(tokenizeForSimilarity(left));
+    const rightSet = new Set(tokenizeForSimilarity(right));
+    if (leftSet.size === 0 || rightSet.size === 0) return 0;
+
+    let intersection = 0;
+    for (const token of leftSet) {
+        if (rightSet.has(token)) intersection += 1;
+    }
+    const union = leftSet.size + rightSet.size - intersection;
+    return union > 0 ? intersection / union : 0;
+};
+
+const normalizeCitySimilarity = (score: number): number => {
+    const normalized = score <= 1 && score >= -1 ? (score + 1) / 2 : score;
+    return Math.max(0, Math.min(1, normalized));
+};
+
 
 const validateProposalDraft = (value: unknown): value is ProposalDraft => {
     if (!value || typeof value !== "object") return false;
@@ -876,7 +901,7 @@ const buildFallbackReviewResponse = (
     const strongMatches = evidenceByItem.slice(0, 3);
     const weakMatches = evidenceByItem.slice(-3).reverse();
 
-    const missingFields: Array<{ key: keyof ProposalDraft; label: string }> = [
+    const fieldCandidates: Array<{ key: keyof ProposalDraft; label: string }> = [
         { key: "purpose", label: "目的" },
         { key: "target", label: "対象" },
         { key: "content", label: "施策内容" },
@@ -884,8 +909,10 @@ const buildFallbackReviewResponse = (
         { key: "budget", label: "予算" },
         { key: "period", label: "期間" },
         { key: "evidence", label: "根拠" }
-    ].filter((field) => {
-        const value = proposalDraft[field.key]?.trim() ?? "";
+    ];
+
+    const missingFields = fieldCandidates.filter((field) => {
+        const value = proposalDraft[field.key].trim();
         return value.length < 6 || value.includes("未定");
     });
 
@@ -1012,10 +1039,10 @@ app.post<{ Body: ProposalSimilarRequest }>("/api/proposals/similar", async (requ
     const baseCode = body.municipalityCode?.trim() || municipality.code;
 
     const similarCitiesFromSimilarity = await buildSimilarCitiesFromSimilarity(baseCode, draftText);
-    const similarCities = similarCitiesFromSimilarity ?? buildFallbackSimilarCities(baseCode, draftText, 50);
-    const topCities = similarCities.slice(0, topK);
+    const similarCities = similarCitiesFromSimilarity ?? buildFallbackSimilarCities(baseCode, draftText, Object.keys(municipalities).length);
+    const cityCandidateCount = Math.min(similarCities.length, Math.max(topK * 5, 20));
+    const topCities = similarCities.slice(0, cityCandidateCount);
     const topCityCodes = new Set(topCities.map((city) => normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode));
-
     const filteredPolicies = policies.filter((policy) => {
         const code = normalizeToCdArea(policy.municipalityCode) ?? policy.municipalityCode;
         return topCityCodes.has(code);
@@ -1037,16 +1064,22 @@ app.post<{ Body: ProposalSimilarRequest }>("/api/proposals/similar", async (requ
             ? null
             : "類似自治体の施策が見つからないため、全自治体から候補を抽出しました。";
 
-    const scoreByCode = new Map(
-        topCities.map((city) => [normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode, city.score])
+    const cityScoreByCode = new Map(
+        similarCities.map((city) => [normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode, city.score])
     );
+    const CITY_WEIGHT = 0.6;
+    const TEXT_WEIGHT = 0.4;
 
     const similarItems: ProposalSimilarItem[] = policiesForSimilar
         .map((policy) => {
             const policyCode = normalizeToCdArea(policy.municipalityCode) ?? policy.municipalityCode;
+            const cityScore = normalizeCitySimilarity(cityScoreByCode.get(policyCode) ?? 0);
+            const policyText = `${policy.title} ${policy.summary} ${policy.details} ${(policy.keywords ?? []).join(" ")}`.trim();
+            const textScore = calcTextSimilarity(draftText, policyText);
+            const combinedScore = cityScore * CITY_WEIGHT + textScore * TEXT_WEIGHT;
             return {
                 id: policy.id,
-                score: scoreByCode.get(policyCode) ?? 0,
+                score: combinedScore,
                 municipality: policy.municipalityName,
                 year: null,
                 title: policy.title,
@@ -1507,7 +1540,7 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   const rawKeyword = (request.query.keyword ?? "").trim();
   const keyword = rawKeyword.toLowerCase();
   const similarCitiesFromSimilarity = await buildSimilarCitiesFromSimilarity(municipality.code, rawKeyword);
-  const similarCities = similarCitiesFromSimilarity ?? buildFallbackSimilarCities(municipality.code, rawKeyword, 20);
+  const similarCities = similarCitiesFromSimilarity ?? buildFallbackSimilarCities(municipality.code, rawKeyword, Object.keys(municipalities).length);
   const top5Cities = similarCities.slice(0, 5);
   const worstCities = similarCities.length > 20 ? [...similarCities].slice(-20).reverse() : [...similarCities].reverse();
   const top5Set = new Set(top5Cities.map((city) => normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode));
@@ -1522,23 +1555,8 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
     return haystack.includes(keyword);
   });
 
-  // Pick policies that are both keyword-matched and implemented by similar municipalities.
-  const fromTop5Cities = keywordMatched
-    .filter((policy) => {
-      const policyCode = normalizeToCdArea(policy.municipalityCode) ?? policy.municipalityCode;
-      return top5Set.has(policyCode);
-    })
-    .sort((a, b) => {
-      const aCode = normalizeToCdArea(a.municipalityCode) ?? a.municipalityCode;
-      const bCode = normalizeToCdArea(b.municipalityCode) ?? b.municipalityCode;
-      const aRank = top5Rank.get(aCode) ?? Number.MAX_SAFE_INTEGER;
-      const bRank = top5Rank.get(bCode) ?? Number.MAX_SAFE_INTEGER;
-      if (aRank !== bRank) return aRank - bRank;
-      return a.id.localeCompare(b.id);
-    });
-
-  // Fallback: if no top5 policy matches, keep previous behavior and return keyword-matched list.
-  const policiesToReturn = fromTop5Cities.length > 0 ? fromTop5Cities : keywordMatched;
+  // Return all municipalities' policies (or all keyword matches), then sort by similarity score.
+  const policiesToReturn = keywordMatched;
 
   // Sort policies by similarity score (desc), then municipality code, then id.
   const sortedPolicies = [...policiesToReturn].sort((a, b) => {
