@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "concurrently \"pnpm dev:api\" \"pnpm dev:web\"",
     "dev:all": "concurrently -k -n PY,API,WEB -c green,blue,magenta \"pnpm dev:python\" \"pnpm dev:api:similarity\" \"pnpm dev:web\"",
-    "dev:python": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-python.ps1",
-    "dev:api:similarity": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-api-similarity.ps1",
+    "dev:python": "node scripts/run.js dev-python",
+    "dev:api:similarity": "node scripts/run.js dev-api-similarity",
     "dev:web": "pnpm --filter @gov-sync/web dev",
     "dev:api": "pnpm --filter @gov-sync/api dev",
     "build": "pnpm --filter @gov-sync/api build && pnpm --filter @gov-sync/web build"
