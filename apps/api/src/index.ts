@@ -1471,7 +1471,10 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   if (!municipality) return;
 
   const rawKeyword = (request.query.keyword ?? "").trim();
-  const keyword = rawKeyword.toLowerCase();
+  const keywordTokens = rawKeyword
+    .split(/[\s\u3000,，、]+/)
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length > 0);
   const similarCitiesFromSimilarity = await buildSimilarCitiesFromSimilarity(municipality.code, rawKeyword);
   const similarCities = similarCitiesFromSimilarity ?? buildFallbackSimilarCities(municipality.code, rawKeyword, Object.keys(municipalities).length);
   const top5Cities = similarCities.slice(0, 5);
@@ -1483,9 +1486,9 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   const keywordMatched = policies.filter((policy) => {
     // Exclude policies with missing PDF linkage from search results only.
     if (!policy.pdfUrl) return false;
-    if (!keyword) return true;
+    if (keywordTokens.length === 0) return true;
     const haystack = `${policy.title} ${policy.summary} ${policy.details} ${policy.keywords.join(" ")}`.toLowerCase();
-    return haystack.includes(keyword);
+    return keywordTokens.some((token) => haystack.includes(token));
   });
 
   // Return all municipalities' policies (or all keyword matches), then sort by similarity score.

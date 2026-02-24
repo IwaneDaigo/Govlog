@@ -103,7 +103,8 @@ const extractNoFromItems = (items: PageTextItem[]): string | null => {
 
 const extractBusinessNameFromLabelLine = (items: PageTextItem[], label: string): string | undefined => {
   const normalized = items.map((i) => ({ ...i, t: i.str.trim() })).filter((i) => i.t.length > 0);
-  const labelItem = normalized.find((i) => i.t === label);
+  const labelPattern = new RegExp(`^${label}(?:[:\uff1a])?$`);
+  const labelItem = normalized.find((i) => labelPattern.test(i.t));
   if (!labelItem) return undefined;
 
   const lineItems = normalized
@@ -138,7 +139,10 @@ const extractTitleFromItems = (items: PageTextItem[]): string | undefined => {
 const cleanupBusinessName = (value: string): string | undefined => {
   const cleaned = normalizeText(value)
     .replace(/^[:\uff1a\-\u30fb\s]+/, "")
+    // Remove trailing annotations like "（取組 1-1-2）" or truncated "（取組 1-1"
+    .replace(/\s*[\(\uff08]\s*\u53d6\u7d44.*$/, "")
     .replace(/\s*(?:\u4e8b\u696d\u306e\u76ee\u7684|\u4e8b\u696d\u76ee\u7684|\u6240\u5c5e|\u62c5\u5f53|\u4e88\u7b97|\u8a55\u4fa1|\u6210\u679c\u6307\u6a19|\u6307\u6a19).*$/, "")
+    .replace(/[\(\uff08\uff3b\uff5b]\s*$/, "")
     .trim();
 
   if (!cleaned) return undefined;

@@ -4,8 +4,14 @@ import NextLink from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import {
+  Accordion,
+  AccordionButton,
+  AccordionIcon,
+  AccordionItem,
+  AccordionPanel,
   Badge,
   Box,
+  Button,
   Heading,
   HStack,
   Link,
@@ -27,6 +33,8 @@ type SearchData = {
   policies: Policy[];
 };
 
+const PAGE_SIZE = 12;
+
 const toScore100 = (score: number): number => {
   const normalized = score <= 1 && score >= -1 ? ((score + 1) / 2) * 100 : score * 100;
   return Math.max(0, Math.min(100, normalized));
@@ -34,15 +42,14 @@ const toScore100 = (score: number): number => {
 
 const AXIS_LABELS: Record<string, string> = {
   need: "ニーズ",
-  support: "支援力",
+  support: "支援性",
   feasibility: "実現性"
 };
 
 function AxisBreakdown({ axisScore }: { axisScore: { need: number; support: number; feasibility: number } }) {
-  const axes = (["need", "support", "feasibility"] as const).filter(
-    (k) => axisScore[k] > 0
-  );
+  const axes = (["need", "support", "feasibility"] as const).filter((k) => axisScore[k] > 0);
   if (axes.length === 0) return null;
+
   return (
     <Stack mt={2} spacing={1}>
       {axes.map((k) => {
@@ -53,13 +60,77 @@ function AxisBreakdown({ axisScore }: { axisScore: { need: number; support: numb
               {AXIS_LABELS[k]}
             </Text>
             <Progress value={pct} size="xs" borderRadius="full" colorScheme="orange" flex={1} />
-            <Text fontSize="xs" color="gray.600" w="30px" textAlign="right">
+            <Text fontSize="xs" color="gray.600" w="36px" textAlign="right">
               {pct}%
             </Text>
           </HStack>
         );
       })}
     </Stack>
+  );
+}
+
+function CityRankingList({
+  title,
+  description,
+  cities,
+  scoreScheme
+}: {
+  title: string;
+  description: string;
+  cities: TwinCity[];
+  scoreScheme: "orange" | "red";
+}) {
+  return (
+    <Accordion allowToggle defaultIndex={[]} borderWidth="1px" rounded="2xl" bg="white">
+      <AccordionItem border="none">
+        <h2>
+          <AccordionButton px={6} py={5}>
+            <Box flex="1" textAlign="left">
+              <Heading size="md">{title}</Heading>
+              <Text mt={1} fontSize="sm" color="gray.600">
+                {description}
+              </Text>
+            </Box>
+            <Badge mr={3} colorScheme="gray">
+              {cities.length}件
+            </Badge>
+            <AccordionIcon />
+          </AccordionButton>
+        </h2>
+        <AccordionPanel px={6} pb={5}>
+          <Stack spacing={2}>
+            {cities.map((city, idx) => {
+              const score100 = toScore100(city.score);
+              return (
+                <Box key={`${city.municipalityCode}-${idx}`} borderWidth="1px" rounded="lg" px={3} py={2}>
+                  <HStack justify="space-between">
+                    <HStack>
+                      <Badge colorScheme="gray" minW="28px" textAlign="center">
+                        {idx + 1}
+                      </Badge>
+                      <Text fontSize="sm">{city.municipalityName}</Text>
+                      <Text fontSize="xs" color="gray.500">
+                        ({city.municipalityCode})
+                      </Text>
+                    </HStack>
+                    <Badge colorScheme={scoreScheme} variant="subtle">
+                      {score100.toFixed(1)}点
+                    </Badge>
+                  </HStack>
+                  {city.axisScore && <AxisBreakdown axisScore={city.axisScore} />}
+                </Box>
+              );
+            })}
+            {cities.length === 0 ? (
+              <Text fontSize="sm" color="gray.600">
+                データがありません。
+              </Text>
+            ) : null}
+          </Stack>
+        </AccordionPanel>
+      </AccordionItem>
+    </Accordion>
   );
 }
 
@@ -70,9 +141,11 @@ function ResultsContent() {
 
   const [data, setData] = useState<SearchData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [currentPage, setCurrentPage] = useState(1);
 
   useEffect(() => {
     setLoading(true);
+    setCurrentPage(1);
     api.search(keyword)
       .then((res) => setData(res))
       .catch(() => router.push("/login"))
@@ -81,6 +154,7 @@ function ResultsContent() {
 
   const similarCities = data?.similarCities ?? data?.top5Cities ?? [];
   const worstCities = data?.worstCities ?? [];
+  const policies = data?.policies ?? [];
 
   const scoreByMunicipality = useMemo(() => {
     const map = new Map<string, number>();
@@ -90,17 +164,22 @@ function ResultsContent() {
     return map;
   }, [similarCities]);
 
-  useEffect(() => {
-    if (!data) return;
-    const scoreRows = similarCities.map((city) => ({
-      municipalityCode: city.municipalityCode,
-      municipalityName: city.municipalityName,
-      scoreRaw: city.score,
-      score100: Number(toScore100(city.score).toFixed(1))
-    }));
-    // Temporary debug log for score validation in browser console.
-    console.log("[Gov-Sync] 類似度スコア一覧", scoreRows);
-  }, [data, similarCities]);
+  const axisByMunicipality = useMemo(() => {
+    const map = new Map<string, { need: number; support: number; feasibility: number }>();
+    similarCities.forEach((city) => {
+      if (city.axisScore) {
+        map.set(city.municipalityCode, city.axisScore);
+      }
+    });
+    return map;
+  }, [similarCities]);
+
+  const totalPages = Math.max(1, Math.ceil(policies.length / PAGE_SIZE));
+  const pageStart = (currentPage - 1) * PAGE_SIZE;
+  const currentPolicies = policies.slice(pageStart, pageStart + PAGE_SIZE);
+
+  const canPrev = currentPage > 1;
+  const canNext = currentPage < totalPages;
 
   return (
     <Stack spacing={6}>
@@ -117,9 +196,9 @@ function ResultsContent() {
       </HStack>
 
       <Box rounded="2xl" p={6} borderWidth="1px" bg="orange.50">
-        <Heading size="md">似ている自治体 TOP5</Heading>
+        <Heading size="md">類似自治体 TOP5</Heading>
         <Text mt={1} fontSize="sm" color="gray.600">
-          類似度を100点満点で表示しています
+          類似度を100点満点で表示
         </Text>
         <SimpleGrid mt={4} spacing={3} minChildWidth="190px">
           {(data?.top5Cities ?? []).map((city) => {
@@ -134,7 +213,7 @@ function ResultsContent() {
                 </Text>
                 <HStack mt={2} justify="space-between">
                   <Text fontSize="xs" color="gray.600">
-                    類似度スコア
+                    類似度
                   </Text>
                   <Badge colorScheme="orange" borderRadius="full" px={2}>
                     {score100.toFixed(1)}点
@@ -148,100 +227,60 @@ function ResultsContent() {
         </SimpleGrid>
       </Box>
 
-      <Box rounded="2xl" p={6} borderWidth="1px" bg="white">
-        <Heading size="md">類似自治体ランキング（TOP20）</Heading>
-        <Text mt={1} fontSize="sm" color="gray.600">
-          TOP5以外も含めて確認できます
-        </Text>
-        <Stack mt={4} spacing={2}>
-          {similarCities.map((city, idx) => {
-            const score100 = toScore100(city.score);
-            return (
-              <Box
-                key={`${city.municipalityCode}-${idx}`}
-                borderWidth="1px"
-                rounded="lg"
-                px={3}
-                py={2}
-              >
-                <HStack justify="space-between">
-                  <HStack>
-                    <Badge colorScheme="gray" minW="28px" textAlign="center">
-                      {idx + 1}
-                    </Badge>
-                    <Text fontSize="sm">{city.municipalityName}</Text>
-                    <Text fontSize="xs" color="gray.500">
-                      ({city.municipalityCode})
-                    </Text>
-                  </HStack>
-                  <Badge colorScheme="orange" variant="subtle">
-                    {score100.toFixed(1)}点
-                  </Badge>
-                </HStack>
-                {city.axisScore && <AxisBreakdown axisScore={city.axisScore} />}
-              </Box>
-            );
-          })}
-          {!loading && similarCities.length === 0 ? (
-            <Text fontSize="sm" color="orange.700">
-              類似度データを取得できませんでした。Python類似度サービスの接続設定を確認してください。
-            </Text>
-          ) : null}
-        </Stack>
-      </Box>
+      <CityRankingList
+        title="類似自治体ランキング TOP20"
+        description="折りたたみで表示/非表示を切り替えできます。"
+        cities={similarCities}
+        scoreScheme="orange"
+      />
 
-      <Box rounded="2xl" p={6} borderWidth="1px" bg="white">
-        <Heading size="md">類似自治体ランキング（ワースト20）</Heading>
-        <Text mt={1} fontSize="sm" color="gray.600">
-          類似度が低い自治体です
-        </Text>
-        <Stack mt={4} spacing={2}>
-          {worstCities.map((city, idx) => {
-            const score100 = toScore100(city.score);
-            return (
-              <HStack
-                key={`${city.municipalityCode}-worst-${idx}`}
-                justify="space-between"
-                borderWidth="1px"
-                rounded="lg"
-                px={3}
-                py={2}
-              >
-                <HStack>
-                  <Badge colorScheme="gray" minW="28px" textAlign="center">
-                    {idx + 1}
-                  </Badge>
-                  <Text fontSize="sm">{city.municipalityName}</Text>
-                  <Text fontSize="xs" color="gray.500">
-                    ({city.municipalityCode})
-                  </Text>
-                </HStack>
-                <Badge colorScheme="red" variant="subtle">
-                  {score100.toFixed(1)}点
-                </Badge>
-              </HStack>
-            );
-          })}
-          {!loading && worstCities.length === 0 ? (
-            <Text fontSize="sm" color="gray.600">
-              ワースト20のデータはありません。
-            </Text>
-          ) : null}
-        </Stack>
-      </Box>
+      <CityRankingList
+        title="類似自治体ランキング WORST20"
+        description="類似度が低い自治体を表示します。"
+        cities={worstCities}
+        scoreScheme="red"
+      />
 
       <Stack spacing={3}>
-        <Heading size="md">類似自治体の施策一覧</Heading>
+        <HStack justify="space-between" align="end">
+          <Box>
+            <Heading size="md">施策一覧</Heading>
+            <Text mt={1} fontSize="sm" color="gray.600">
+              {policies.length}件中 {policies.length === 0 ? 0 : pageStart + 1}-
+              {Math.min(pageStart + PAGE_SIZE, policies.length)}件を表示
+            </Text>
+          </Box>
+          <HStack>
+            <Button size="sm" onClick={() => setCurrentPage(1)} isDisabled={!canPrev}>
+              先頭
+            </Button>
+            <Button size="sm" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} isDisabled={!canPrev}>
+              前へ
+            </Button>
+            <Text fontSize="sm" minW="90px" textAlign="center">
+              {currentPage} / {totalPages}
+            </Text>
+            <Button size="sm" onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} isDisabled={!canNext}>
+              次へ
+            </Button>
+            <Button size="sm" onClick={() => setCurrentPage(totalPages)} isDisabled={!canNext}>
+              末尾
+            </Button>
+          </HStack>
+        </HStack>
+
         {loading ? (
           <HStack>
             <Spinner size="sm" />
             <Text>読み込み中...</Text>
           </HStack>
         ) : null}
-        {!loading && (data?.policies.length ?? 0) === 0 ? <Text>類似自治体で一致する施策はありません。</Text> : null}
 
-        {(data?.policies ?? []).map((policy: Policy) => {
+        {!loading && policies.length === 0 ? <Text>一致する施策データはありません。</Text> : null}
+
+        {currentPolicies.map((policy: Policy) => {
           const score = scoreByMunicipality.get(policy.municipalityCode);
+          const axisScore = axisByMunicipality.get(policy.municipalityCode);
           return (
             <Box key={policy.id} rounded="2xl" bg="white" p={5} shadow="sm" borderWidth="1px">
               <HStack justify="space-between" align="start">
@@ -254,12 +293,16 @@ function ResultsContent() {
                   </Badge>
                 ) : null}
               </HStack>
+              {axisScore ? <AxisBreakdown axisScore={axisScore} /> : null}
+
               <Heading mt={1} size="md">
                 {policy.title}
               </Heading>
+
               <Text mt={2} fontSize="sm" color="gray.700">
                 {policy.summary && policy.summary.trim().length > 0 ? policy.summary : "詳細はPDFで確認できます。"}
               </Text>
+
               <HStack mt={4} justify="space-between" align="center">
                 <Wrap spacing={2}>
                   {(policy.keywords ?? []).map((tag) => (
