@@ -61,6 +61,7 @@ export type ImportPdfResult = {
 
 const SHEET_LABEL = "\u4e8b\u52d9\u4e8b\u696d\u8a55\u4fa1\u30b7\u30fc\u30c8";
 const JIMU_LABEL = "\u4e8b\u52d9\u4e8b\u696d\u540d";
+const SIMPLE_BUSINESS_LABEL = "\u4e8b\u696d\u540d";
 const DETAIL_SECTION_LABEL = "\u226a\u4e8b\u696d\u5b9f\u7e3e\u7b49\u226b";
 const STATUS_SECTION_LABEL = "\u226a\u53d6\u7d44\u72b6\u6cc1\u226b";
 const FALLBACK_TITLE_PREFIX = "\u4e8b\u696d";
@@ -87,6 +88,24 @@ const extractNoFromItems = (items: PageTextItem[]): string | null => {
     .filter((i) => i.x >= 500 && i.y >= 740 && /^[0-9]{1,4}$/.test(i.t))
     .sort((a, b) => b.y - a.y || a.x - b.x)[0];
   return topRightNum?.t ?? null;
+};
+
+const extractBusinessNameFromLabelLine = (items: PageTextItem[], label: string): string | undefined => {
+  const normalized = items.map((i) => ({ ...i, t: i.str.trim() })).filter((i) => i.t.length > 0);
+  const labelItem = normalized.find((i) => i.t === label);
+  if (!labelItem) return undefined;
+
+  const lineItems = normalized
+    .filter((i) => Math.abs(i.y - labelItem.y) <= 3 && i.x > labelItem.x)
+    .sort((a, b) => a.x - b.x);
+
+  if (lineItems.length === 0) return undefined;
+
+  const firstNonNumber = lineItems.find((i, idx) => !/^\d{1,4}$/.test(i.t) && (idx === 0 || /^\d{1,4}$/.test(lineItems[idx - 1].t)));
+  if (firstNonNumber) return cleanupBusinessName(firstNonNumber.t);
+
+  const joined = normalizeText(lineItems.map((i) => i.t).join(" "));
+  return cleanupBusinessName(joined);
 };
 
 const extractTitleFromItems = (items: PageTextItem[]): string | undefined => {
@@ -124,7 +143,12 @@ const extractBusinessNameFromItems = (items: PageTextItem[]): string | undefined
     .sort((a, b) => b.y - a.y || a.x - b.x);
 
   const header = normalized.find((i) => /\u4ee4\u548c[6\uff16]\u5e74\u5ea6\s*\u4e8b\u696d\u540d/.test(i.t));
-  if (!header) return undefined;
+  if (!header) {
+    return (
+      extractBusinessNameFromLabelLine(items, SIMPLE_BUSINESS_LABEL) ??
+      extractBusinessNameFromLabelLine(items, "\u7d30\u4e8b\u696d\u540d\u79f0")
+    );
+  }
 
   const lineItems = normalized
     .filter((i) => Math.abs(i.y - header.y) <= 3 && i.x > header.x)
@@ -143,7 +167,8 @@ const extractBusinessNameFromItems = (items: PageTextItem[]): string | undefined
 
 const extractBusinessNameFromText = (text: string): string | undefined => {
   const patterns = [
-    /\u4ee4\u548c[6\uff16]\u5e74\u5ea6\s*\u4e8b\u696d\u540d\s*[:\uff1a]?\s*(.+?)(?=\s*(?:\u6b73\u51fa\u4e88\u7b97\u79d1\u76ee|\u6240\u7ba1\u533a\u5c40\u30fb\u8ab2|\u4e8b\u696d\u6982\u8981|$))/
+    /\u4ee4\u548c[6\uff16]\u5e74\u5ea6\s*\u4e8b\u696d\u540d\s*[:\uff1a]?\s*(.+?)(?=\s*(?:\u6b73\u51fa\u4e88\u7b97\u79d1\u76ee|\u6240\u7ba1\u533a\u5c40\u30fb\u8ab2|\u4e8b\u696d\u6982\u8981|$))/,
+    /\u4e8b\u696d\u540d\s*\d{1,4}\s*([^\s]+)/
   ];
 
   for (const pattern of patterns) {
@@ -236,7 +261,8 @@ export const importPoliciesFromPdf = async (options: ImportPdfOptions): Promise<
     const businessName = pageBusinessNames[pageNumber - 1];
     const hasBusinessHeader = pageHasBusinessHeader[pageNumber - 1];
     const isBasicPageLike = pageBasicFlags[pageNumber - 1];
-    const mlStart = mlPredictions?.[pageNumber - 1]?.isStart ?? false;
+    // ML start prediction is only used in the fallback block when rule-based splitting yields 0 segments.
+    const mlStart = false;
 
     let startKey: string | null = null;
     if (hasBusinessHeader) {
@@ -249,7 +275,7 @@ export const importPoliciesFromPdf = async (options: ImportPdfOptions): Promise<
       lastBusinessName = businessName;
     } else if (no) {
       startKey = no;
-    } else if (mlStart || (isBasicPageLike && title)) {
+    } else if (isBasicPageLike && title) {
       autoNo += 1;
       startKey = String(autoNo);
       if (mlStart) mlUsed = true;

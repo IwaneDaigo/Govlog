@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { FormEvent, useEffect, useState } from "react";
 import NextLink from "next/link";
@@ -47,9 +47,9 @@ export default function SearchPage() {
     <Stack spacing={6}>
       <HStack justify="space-between" align="start">
         <Box>
-          <Heading size="lg">施策検索</Heading>
+          <Heading size="lg">検索ページ</Heading>
           <Text mt={1} color="gray.600" fontSize="sm">
-            ログイン自治体: {municipality ? `${municipality.name} (${municipality.code})` : "読み込み中..."}
+            ログイン自治体 {municipality ? `${municipality.name} (${municipality.code})` : "ログイン情報を確認中..."}
           </Text>
         </Box>
         <Button variant="outline" onClick={onLogout} isLoading={loggingOut} loadingText="ログアウト中...">
@@ -64,7 +64,7 @@ export default function SearchPage() {
             <Input
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
-              placeholder="例: 子育て, 防災, DX"
+              placeholder="例: 防災, 子育て, DX"
             />
           </FormControl>
 
@@ -75,13 +75,18 @@ export default function SearchPage() {
       </Box>
 
       <Box rounded="2xl" bg="white" p={6} shadow="sm" borderWidth="1px">
-        <Heading size="sm">管理機能</Heading>
+        <Heading size="sm">その他の操作</Heading>
         <Text mt={2} fontSize="sm" color="gray.600">
-          行政評価シートPDFの分割・抽出・施策データ反映を実行します。
+          施策PDFの取り込みや企画書の作成ができます。
         </Text>
-        <Link as={NextLink} href="/app/import" color="blue.600" fontWeight="semibold" mt={3} display="inline-block">
-          施策PDF取り込みを開く
-        </Link>
+        <HStack mt={3} spacing={4}>
+          <Link as={NextLink} href="/app/import" color="blue.600" fontWeight="semibold">
+            施策PDF取り込み
+          </Link>
+          <Link as={NextLink} href="/app/proposal" color="orange.500" fontWeight="semibold">
+            企画書を作成
+          </Link>
+        </HStack>
       </Box>
     </Stack>
   );

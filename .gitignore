@@ -22,3 +22,6 @@ Thumbs.db
 __pycache__/
 *.pyc
 .venv/
+/data/uploads/
+/data/policies-pdf/
+/data/fonts/*.ttc

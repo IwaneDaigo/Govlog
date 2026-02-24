@@ -7,6 +7,8 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { SimilarityClient, type SimilarityRequest } from "./lib/similarity-client";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
 import { importPoliciesFromPdf } from "./services/pdf-import";
 
 type Municipality = {
@@ -43,6 +45,16 @@ type Policy = {
   keywords: string[];
   pdfPath?: string;
   pdfUrl?: string;
+};
+
+type ProposalSection = {
+  label: string;
+  value: string;
+};
+
+type ProposalPdfRequest = {
+  title?: string;
+  sections?: ProposalSection[];
 };
 
 type MunicipalityMap = Record<string, { name: string }>;
@@ -420,6 +432,120 @@ app.post("/api/auth/logout", async (_request, reply) => {
   return { success: true };
 });
 
+app.post<{ Body: ProposalPdfRequest }>("/api/proposals/pdf", async (request, reply) => {
+  const municipality = requireSession(request, reply);
+  if (!municipality) return;
+
+  const title = (request.body?.title ?? "").trim() || "企画書";
+  const sections = Array.isArray(request.body?.sections) ? request.body.sections : [];
+
+  const pdfDoc = await PDFDocument.create();
+  pdfDoc.registerFontkit(fontkit);
+  const pageSize: [number, number] = [595.28, 841.89]; // A4
+  let page = pdfDoc.addPage(pageSize);
+  const [pageWidth, pageHeight] = pageSize;
+
+  const fontPathFromEnv = process.env.PROPOSAL_PDF_FONT_PATH?.trim();
+  const fontPathCandidates = [
+    fontPathFromEnv,
+    resolve(rootDir, "data/fonts/NotoSansJP-Regular.ttf"),
+    resolve(rootDir, "data/fonts/NotoSansJP-Regular.otf"),
+    resolve(rootDir, "data/fonts/Meiryo.ttc")
+  ].filter((value): value is string => Boolean(value));
+  const fontPath = fontPathCandidates.find((candidate) => existsSync(candidate));
+  if (!fontPath) {
+    return reply.code(500).send({
+      message: "日本語フォントが見つかりません。data/fonts/NotoSansJP-Regular.ttf を配置してください。"
+    });
+  }
+  if (fontPath.toLowerCase().endsWith(".ttc")) {
+    return reply.code(500).send({
+      message: "TTC形式のフォントは利用できません。TTF/OTFの日本語フォントを配置してください。"
+    });
+  }
+
+  let fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  let fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  try {
+    const fontBytes = readFileSync(fontPath);
+    fontRegular = await pdfDoc.embedFont(fontBytes);
+    fontBold = await pdfDoc.embedFont(fontBytes);
+  } catch (error) {
+    app.log.error({ err: error, fontPath }, "Failed to load custom font.");
+    return reply.code(500).send({
+      message: "日本語フォントの読み込みに失敗しました。フォントファイルを確認してください。"
+    });
+  }
+
+  const margin = 48;
+  let cursorY = pageHeight - margin;
+
+  const ensureSpace = (lineHeight: number) => {
+    if (cursorY - lineHeight < margin) {
+      page = pdfDoc.addPage(pageSize);
+      cursorY = pageHeight - margin;
+    }
+  };
+
+  const drawLine = (text: string, fontSize: number, font = fontRegular, color = rgb(0, 0, 0)) => {
+    ensureSpace(fontSize * 1.4);
+    page.drawText(text, {
+      x: margin,
+      y: cursorY,
+      size: fontSize,
+      font,
+      color
+    });
+    cursorY -= fontSize * 1.4;
+  };
+
+  const wrapText = (text: string, fontSize: number, maxWidth: number, font = fontRegular) => {
+    const lines: string[] = [];
+    const paragraphs = text.split(/\r?\n/);
+    for (const para of paragraphs) {
+      if (!para.trim()) {
+        lines.push("");
+        continue;
+      }
+      let line = "";
+      for (const char of Array.from(para)) {
+        const testLine = line + char;
+        if (font.widthOfTextAtSize(testLine, fontSize) > maxWidth && line) {
+          lines.push(line);
+          line = char;
+        } else {
+          line = testLine;
+        }
+      }
+      if (line) lines.push(line);
+    }
+    return lines;
+  };
+
+  drawLine(title, 20, fontBold);
+  drawLine(`作成自治体: ${municipality.name} (${municipality.code})`, 10, fontRegular, rgb(0.35, 0.35, 0.35));
+  drawLine(`作成日: ${new Date().toISOString().slice(0, 10)}`, 10, fontRegular, rgb(0.35, 0.35, 0.35));
+  cursorY -= 6;
+
+  const contentWidth = pageWidth - margin * 2;
+  for (const section of sections) {
+    const label = (section.label ?? "").trim();
+    const value = (section.value ?? "").trim();
+    if (!label || !value) continue;
+    drawLine(label, 13, fontBold);
+    const lines = wrapText(value, 11, contentWidth, fontRegular);
+    for (const line of lines) {
+      drawLine(line, 11, fontRegular);
+    }
+    cursorY -= 4;
+  }
+
+  const pdfBytes = await pdfDoc.save();
+  reply.header("Content-Type", "application/pdf");
+  reply.header("Content-Disposition", "attachment; filename=\"proposal.pdf\"");
+  return reply.send(Buffer.from(pdfBytes));
+});
+
 app.post<{
   Body: {
     inputPdfPath: string;
@@ -694,6 +820,9 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   const worstCities = similarCities.length > 20 ? [...similarCities].slice(-20).reverse() : [...similarCities].reverse();
   const top5Set = new Set(top5Cities.map((city) => normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode));
   const top5Rank = new Map(top5Cities.map((city, idx) => [normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode, idx]));
+  const similarityScoreByCode = new Map(
+    similarCities.map((city) => [normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode, city.score])
+  );
 
   const keywordMatched = policies.filter((policy) => {
     if (!keyword) return true;
@@ -719,11 +848,22 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   // Fallback: if no top5 policy matches, keep previous behavior and return keyword-matched list.
   const policiesToReturn = fromTop5Cities.length > 0 ? fromTop5Cities : keywordMatched;
 
+  // Sort policies by similarity score (desc), then municipality code, then id.
+  const sortedPolicies = [...policiesToReturn].sort((a, b) => {
+    const aCode = normalizeToCdArea(a.municipalityCode) ?? a.municipalityCode;
+    const bCode = normalizeToCdArea(b.municipalityCode) ?? b.municipalityCode;
+    const aScore = similarityScoreByCode.get(aCode) ?? -1;
+    const bScore = similarityScoreByCode.get(bCode) ?? -1;
+    if (aScore !== bScore) return bScore - aScore;
+    if (aCode !== bCode) return aCode.localeCompare(bCode);
+    return a.id.localeCompare(b.id);
+  });
+
   return {
     top5Cities,
     similarCities: similarCities.slice(0, 20),
     worstCities,
-    policies: policiesToReturn
+    policies: sortedPolicies
   };
 });
 
