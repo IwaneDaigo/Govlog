@@ -111,3 +111,13 @@ class UnifiedSimilarityResponse(BaseModel):
 NeighborResult = UnifiedNeighbor
 ChildcareSimilarityResponse = UnifiedSimilarityResponse
 SimilarityResponse = UnifiedSimilarityResponse
+
+
+class MunicipalityDataResponse(BaseModel):
+    """
+    GET /municipality/{cd_area} のレスポンス。
+    取得済み指標のみを返す。
+    """
+
+    cd_area: str
+    indicators: dict[str, float]

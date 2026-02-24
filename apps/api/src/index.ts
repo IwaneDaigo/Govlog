@@ -4,12 +4,10 @@ import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { SimilarityClient, type SimilarityRequest } from "./lib/similarity-client";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-import * as fontkit from "@pdf-lib/fontkit";
 import { importPoliciesFromPdf } from "./services/pdf-import";
 
 type Municipality = {
@@ -49,14 +47,58 @@ type Policy = {
   pdfUrl?: string;
 };
 
-type ProposalSection = {
-  label: string;
-  value: string;
+type ProposalCsvConceptKey =
+  | "proposal_id"
+  | "municipality_code"
+  | "title"
+  | "issue"
+  | "target"
+  | "solution"
+  | "kpi"
+  | "budget"
+  | "period"
+  | "premise";
+
+type ProposalCsvRow = {
+  rowNumber: number;
+  values: Record<string, string>;
 };
 
-type ProposalPdfRequest = {
-  title?: string;
-  sections?: ProposalSection[];
+type ProposalCsvReviewRow = {
+  proposalId: string;
+  municipalityCode: string;
+  section: string;
+  importance: "高" | "中" | "低";
+  issue: string;
+  suggestion: string;
+  evidence: string;
+  classification: "強み" | "弱み";
+  alternative: string;
+  overall: string;
+};
+
+type ProposalCsvGeminiFinding = {
+  section: string;
+  importance: "高" | "中" | "低";
+  issue: string;
+  suggestion: string;
+  classification: "強み" | "弱み";
+  alternative: string;
+};
+
+type ProposalCsvGeminiResponse = {
+  overall: string;
+  findings: ProposalCsvGeminiFinding[];
+};
+
+type ProposalCsvGeminiBatchItem = {
+  proposal_id: string;
+  overall?: string;
+  findings?: ProposalCsvGeminiFinding[];
+};
+
+type ProposalCsvGeminiBatchResponse = {
+  results: ProposalCsvGeminiBatchItem[];
 };
 
 type ProposalDraft = {
@@ -68,62 +110,6 @@ type ProposalDraft = {
     budget: string;
     period: string;
     evidence: string;
-};
-
-type ProposalSimilarRequest = {
-    proposalDraft: ProposalDraft;
-    municipalityCode?: string;
-    yearRange?: [number, number];
-    topK?: number;
-};
-
-type ProposalSimilarItem = {
-    id: string;
-    score: number;
-    municipality: string;
-    year: number | null;
-    title: string;
-    summary: string;
-    evidenceSnippets: string[];
-};
-
-type ProposalReviewItem = {
-    id: string;
-    evidenceText: string;
-};
-
-type ProposalReviewRequest = {
-    proposalDraft: ProposalDraft;
-    similarItems: ProposalReviewItem[];
-    style?: "strict" | "gentle";
-    length?: "short" | "medium" | "long";
-};
-
-type ProposalReviewResponse = {
-    revised_proposal: ProposalDraft;
-    diff: Array<{ field: keyof ProposalDraft; before: string; after: string }>;
-    overall_review: string;
-    fit_analysis: {
-        good_points: string[];
-        weak_points: string[];
-        matching_points: string[];
-        non_matching_points: string[];
-    };
-    improvement_actions: string[];
-    advice?: {
-        kpi_suggestions: string[];
-        risks: string[];
-        implementation_steps: string[];
-        budget_notes: string[];
-        evaluation_plan: string[];
-    };
-    citations: Array<{
-        source_id: string;
-        municipality: string;
-        year: number | null;
-        quote: string;
-        used_for: string;
-    }>;
 };
 
 type MunicipalityMap = Record<string, { name: string }>;
@@ -162,6 +148,60 @@ const readJsonWithFallback = <T>(primaryFileName: string, fallbackFileName: stri
   return JSON.parse(readFileSync(targetPath, "utf-8")) as T;
 };
 
+const listPolicyJsonFiles = (): string[] => {
+  const allNames = readdirSync(dataDir)
+    .filter((name) => /^policies(?:\.[^.]+)*\.json$/i.test(name));
+  const primary = allNames
+    .filter((name) => name !== "policies.sample.json")
+    .sort((a, b) => {
+      if (a === "policies.json") return -1;
+      if (b === "policies.json") return 1;
+      return a.localeCompare(b);
+    });
+  if (primary.length > 0) {
+    return primary;
+  }
+  return allNames.includes("policies.sample.json") ? ["policies.sample.json"] : [];
+};
+
+const readAllPolicies = (): RawPolicy[] => {
+  const files = listPolicyJsonFiles();
+  const byId = new Map<string, RawPolicy>();
+  const hasExistingPdf = (pdfPath?: string): boolean => {
+    if (!pdfPath) return false;
+    const normalized = String(pdfPath)
+      .replace(/\\/g, "/")
+      .replace(/^\/+/, "")
+      .replace(/^data\//, "")
+      .replace(/^policies-pdf\//, "");
+    return existsSync(resolve(policiesPdfDir, normalized));
+  };
+  for (const fileName of files) {
+    const abs = resolve(dataDir, fileName);
+    try {
+      const parsed = JSON.parse(readFileSync(abs, "utf-8")) as RawPolicy[];
+      for (const item of parsed) {
+        if (!item?.id) continue;
+        const current = byId.get(item.id);
+        if (!current) {
+          byId.set(item.id, item);
+          continue;
+        }
+        const currentHasPdf = hasExistingPdf(current.pdfPath);
+        const nextHasPdf = hasExistingPdf(item.pdfPath);
+        // Prefer the record whose pdfPath points to an existing file.
+        if (!currentHasPdf && nextHasPdf) {
+          byId.set(item.id, item);
+        }
+      }
+    } catch (error) {
+      // Keep the service available even if one JSON is malformed/encoded unexpectedly.
+      console.warn(`[policies] failed to load ${fileName}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return Array.from(byId.values());
+};
+
 const parseCsvLine = (line: string): string[] => {
   const values: string[] = [];
   let current = "";
@@ -189,6 +229,76 @@ const parseCsvLine = (line: string): string[] => {
 };
 
 const stripBom = (value: string): string => value.replace(/^\uFEFF/, "");
+
+const normalizeHeader = (value: string): string =>
+  stripBom(value).toLowerCase().replace(/[\s_\-　]/g, "");
+
+const PROPOSAL_CSV_HEADER_HINTS: Record<ProposalCsvConceptKey, string[]> = {
+  proposal_id: ["proposalid", "企画id", "企画識別子", "id"],
+  municipality_code: ["municipalitycode", "自治体コード", "自治体cd", "cd_area", "cdarea"],
+  title: ["title", "タイトル", "事業名", "施策名"],
+  issue: ["issue", "課題", "現状課題", "背景"],
+  target: ["target", "対象", "対象者", "対象範囲", "scope"],
+  solution: ["solution", "解決策", "施策内容", "内容", "approach"],
+  kpi: ["kpi", "指標", "成果指標", "効果"],
+  budget: ["budget", "予算", "費用"],
+  period: ["period", "期間", "スケジュール", "実施期間"],
+  premise: ["premise", "前提", "根拠", "前提条件", "notes"]
+};
+
+const parseCsvText = (csvText: string): { headers: string[]; rows: ProposalCsvRow[] } => {
+  const lines = csvText
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0);
+  if (lines.length === 0) {
+    return { headers: [], rows: [] };
+  }
+
+  const headers = parseCsvLine(lines[0]).map((h) => stripBom(h).trim());
+  const rows: ProposalCsvRow[] = lines.slice(1).map((line, idx) => {
+    const cols = parseCsvLine(line);
+    const values: Record<string, string> = {};
+    headers.forEach((header, colIdx) => {
+      values[header] = (cols[colIdx] ?? "").trim();
+    });
+    return { rowNumber: idx + 2, values };
+  });
+
+  return { headers, rows };
+};
+
+const inferProposalCsvMapping = (headers: string[]): Partial<Record<ProposalCsvConceptKey, string>> => {
+  const normalizedHeaders = headers.map((h) => ({ raw: h, normalized: normalizeHeader(h) }));
+  const result: Partial<Record<ProposalCsvConceptKey, string>> = {};
+
+  (Object.keys(PROPOSAL_CSV_HEADER_HINTS) as ProposalCsvConceptKey[]).forEach((key) => {
+    const hints = PROPOSAL_CSV_HEADER_HINTS[key];
+    const matched = normalizedHeaders.find((header) =>
+      hints.some((hint) => header.normalized.includes(normalizeHeader(hint)))
+    );
+    if (matched) {
+      result[key] = matched.raw;
+    }
+  });
+
+  return result;
+};
+
+const csvEscape = (value: string): string => {
+  const escaped = value.replace(/"/g, "\"\"");
+  return /[",\r\n]/.test(escaped) ? `"${escaped}"` : escaped;
+};
+
+const buildCsvOutput = (
+  headers: string[],
+  rows: Array<Record<string, string>>
+): string => {
+  const lines = [headers.map(csvEscape).join(",")];
+  rows.forEach((row) => {
+    lines.push(headers.map((header) => csvEscape(row[header] ?? "")).join(","));
+  });
+  return `${lines.join("\r\n")}\r\n`;
+};
 
 const readMunicipalityMasterCsv = (): MunicipalityMasterItem[] => {
   const primaryPath = resolve(dataDir, "municipalities.csv");
@@ -222,11 +332,23 @@ const normalizePdfPath = (value?: string): string | undefined => {
   if (!value) return undefined;
   const replaced = value.replace(/\\/g, "/").replace(/^\/+/, "").trim();
   if (!replaced || replaced.includes("..")) return undefined;
-  return replaced.replace(/^policies-pdf\//, "");
+  return replaced
+    .replace(/^data\//, "")
+    .replace(/^policies-pdf\//, "");
+};
+
+const resolveExistingPdfPath = (pdfPath?: string): string | undefined => {
+  const normalized = normalizePdfPath(pdfPath);
+  if (!normalized) return undefined;
+  const absPath = resolve(policiesPdfDir, normalized);
+  if (!existsSync(absPath)) {
+    return undefined;
+  }
+  return normalized;
 };
 
 const toPdfUrl = (pdfPath?: string): string | undefined => {
-  const normalized = normalizePdfPath(pdfPath);
+  const normalized = resolveExistingPdfPath(pdfPath);
   if (!normalized) return undefined;
   const encoded = normalized
     .split("/")
@@ -244,12 +366,17 @@ const toPolicy = (item: RawPolicy): Policy => ({
   summary: item.summary ?? "",
   details: item.details ?? "",
   keywords: item.keywords ?? [],
-  pdfPath: normalizePdfPath(item.pdfPath),
+  pdfPath: resolveExistingPdfPath(item.pdfPath),
   pdfUrl: toPdfUrl(item.pdfPath)
 });
 
-const rawPolicies = readJsonWithFallback<RawPolicy[]>("policies.json", "policies.sample.json");
+const rawPolicies = readAllPolicies();
 let policies: Policy[] = rawPolicies.map(toPolicy);
+
+const refreshPoliciesCache = (): void => {
+  const latestRaw = readAllPolicies();
+  policies = latestRaw.map(toPolicy);
+};
 
 const twins = readJsonWithFallback<TwinsMap>("twins.json", "twins.sample.json");
 const municipalityMaster = readMunicipalityMasterCsv();
@@ -475,17 +602,6 @@ const buildFallbackSimilarCities = (
   });
 };
 
-const normalizeProposalDraft = (draft: ProposalDraft): ProposalDraft => ({
-    title: draft.title.trim(),
-    purpose: draft.purpose.trim(),
-    target: draft.target.trim(),
-    content: draft.content.trim(),
-    kpi: draft.kpi.trim(),
-    budget: draft.budget.trim(),
-    period: draft.period.trim(),
-    evidence: draft.evidence.trim()
-});
-
 const proposalDraftToText = (draft: ProposalDraft): string =>
     [
         draft.title,
@@ -500,16 +616,6 @@ const proposalDraftToText = (draft: ProposalDraft): string =>
         .map((value) => value.trim())
         .filter((value) => value.length > 0)
         .join(" ");
-
-const extractEvidenceSnippet = (policy: Policy, keyword: string): string => {
-    const haystack = `${policy.title} ${policy.summary} ${policy.details} ${(policy.keywords ?? []).join(" ")}`.trim();
-    if (!keyword) return haystack.slice(0, 180);
-    const idx = haystack.toLowerCase().indexOf(keyword.toLowerCase());
-    if (idx < 0) return haystack.slice(0, 180);
-    const start = Math.max(0, idx - 40);
-    const end = Math.min(haystack.length, idx + 120);
-    return haystack.slice(start, end);
-};
 const tokenizeForSimilarity = (text: string): string[] =>
     text
         .toLowerCase()
@@ -536,76 +642,148 @@ const normalizeCitySimilarity = (score: number): number => {
     return Math.max(0, Math.min(1, normalized));
 };
 
-const validateProposalDraft = (value: unknown): value is ProposalDraft => {
-    if (!value || typeof value !== "object") return false;
-    const draft = value as Record<string, unknown>;
-    const fields = ["title", "purpose", "target", "content", "kpi", "budget", "period", "evidence"];
-    return fields.every((field) => typeof draft[field] === "string" && String(draft[field]).trim().length > 0);
-};
+const buildDraftFromCsvRow = (
+  row: ProposalCsvRow,
+  mapping: Partial<Record<ProposalCsvConceptKey, string>>
+): ProposalDraft => ({
+  title: (mapping.title ? row.values[mapping.title] : "").trim(),
+  purpose: (mapping.issue ? row.values[mapping.issue] : "").trim(),
+  target: (mapping.target ? row.values[mapping.target] : "").trim(),
+  content: (mapping.solution ? row.values[mapping.solution] : "").trim(),
+  kpi: (mapping.kpi ? row.values[mapping.kpi] : "").trim(),
+  budget: (mapping.budget ? row.values[mapping.budget] : "").trim(),
+  period: (mapping.period ? row.values[mapping.period] : "").trim(),
+  evidence: (mapping.premise ? row.values[mapping.premise] : "").trim()
+});
 
-const validateReviewItems = (value: unknown): value is ProposalReviewItem[] => {
-    if (!Array.isArray(value)) return false;
-    return value.every((item) => {
-        if (!item || typeof item !== "object") return false;
-        const obj = item as Record<string, unknown>;
-        return typeof obj.id === "string"
-            && obj.id.length > 0
-            && typeof obj.evidenceText === "string"
-            && obj.evidenceText.trim().length > 0;
-    });
-};
-
-const buildReviewPrompt = (
-    proposalDraft: ProposalDraft,
-    similarItems: ProposalReviewItem[],
-    style: "strict" | "gentle",
-    length: "short" | "medium" | "long"
+const getRowValue = (
+  row: ProposalCsvRow,
+  mapping: Partial<Record<ProposalCsvConceptKey, string>>,
+  key: ProposalCsvConceptKey
 ): string => {
-    const evidence = similarItems
-        .map((item, idx) => `# Evidence ${idx + 1} (id=${item.id})\n${item.evidenceText}`)
-        .join("\n\n");
+  const header = mapping[key];
+  return header ? (row.values[header] ?? "").trim() : "";
+};
 
-    return [
-        "\u3042\u306a\u305f\u306f\u81ea\u6cbb\u4f53\u653f\u7b56\u306e\u4f01\u753b\u66f8\u6dfb\u524a\u5b98\u3067\u3059\u3002",
-        `\u53b3\u3057\u3055: ${style}`,
-        `\u9577\u3055: ${length}`,
-        "",
-        "## \u4f01\u753b\u66f8\u30c9\u30e9\u30d5\u30c8",
-        JSON.stringify(proposalDraft, null, 2),
-        "",
-        "## \u53c2\u8003\u8cc7\u6599\uff08\u6839\u62e0\uff09",
-        evidence,
-        "",
-        "## \u51fa\u529bJSON\u30b9\u30ad\u30fc\u30de",
-        "{",
-        '  "revised_proposal": { "title": "", "purpose": "", "target": "", "content": "", "kpi": "", "budget": "", "period": "", "evidence": "" },',
-        '  "diff": [ { "field": "kpi", "before": "", "after": "" } ],',
-        '  "overall_review": "",',
-        '  "fit_analysis": {',
-        '    "good_points": [],',
-        '    "weak_points": [],',
-        '    "matching_points": [],',
-        '    "non_matching_points": []',
-        '  },',
-        '  "improvement_actions": [],',
-        '  "citations": [ { "source_id": "", "municipality": "", "year": null, "quote": "", "used_for": "" } ]',
-        "}",
-        "",
-        "\u5fc5\u305aJSON\u306e\u307f\u8fd4\u3059\u3002\u6839\u62e0\u306b\u306a\u3044\u65ad\u5b9a\u306f\u3057\u306a\u3044\u3002\u6570\u5024\u306f\u6839\u62e0\u304c\u306a\u3044\u5834\u5408\u300c\u4f8b\u300d\u3068\u660e\u8a18\u3002",
-        "citations \u306f\u6839\u62e0\u30c6\u30ad\u30b9\u30c8\u306e\u77ed\u3044\u629c\u7c8b\u306e\u307f\u3002\u9577\u6587\u5f15\u7528\u306f\u7981\u6b62\u3002",
-        "\u7dcf\u8a55\u306f1\u3064\u306e\u6bb5\u843d\u3067\u3001\u985e\u4f3c\u65bd\u7b56\u3068\u306e\u6574\u5408/\u4e0d\u6574\u5408\u3092\u542b\u3081\u3066\u8a18\u8f09\u3059\u308b\u3002",
-        "\u50be\u5411\u7684\u306a\u6ce8\u610f\u3088\u308a\u3001\u5177\u4f53\u7684\u306a\u6539\u5584\u884c\u52d5\u3092 improvement_actions \u306b\u5217\u6319\u3059\u308b\u3002",
-        "fit_analysis.good_points / weak_points \u306f\u4f01\u753b\u66f8\u81ea\u8eab\u306e\u5206\u6790\u3001matching_points / non_matching_points \u306f\u985e\u4f3c\u65bd\u7b56\u3068\u306e\u6bd4\u8f03\u7d50\u679c\u3092\u66f8\u304f\u3002",
-        "\u5fc5\u305a citations.used_for \u306b\u3001\u3069\u306e\u8a55\u4fa1\u306e\u6839\u62e0\u306b\u4f7f\u3063\u305f\u304b\u3092\u8a18\u8f09\u3059\u308b\u3002",
-        "\u51fa\u529b\u8cea\u8981\u4ef6:",
-        "- overall_review \u306f 300\u6587\u5b57\u4ee5\u4e0a\u3067\u3001\u73fe\u72b6\u8a55\u4fa1\u2192\u8ab2\u984c\u2192\u6210\u529f\u6761\u4ef6\u3092\u542b\u3081\u308b\u3002",
-        "- fit_analysis \u5404\u9805\u76ee\u306f\u5c11\u306a\u304f\u3068\u3082 3 \u9805\u76ee\u3002\u62bd\u8c61\u8a9e\u3060\u3051\u3067\u306f\u306a\u304f\u3001\u3069\u306e\u8a18\u8f09\u3068\u7d10\u3065\u304f\u304b\u3092\u66f8\u304f\u3002",
-        "- improvement_actions \u306f\u5c11\u306a\u304f\u3068\u3082 5 \u9805\u76ee\u3002\u5404\u9805\u76ee\u306b\u300c\u884c\u52d5\u300d\u300c\u671f\u9650\u300d\u300c\u6210\u679c\u7269\u300d\u3092\u542b\u3081\u308b\u3002",
-        "- \u6570\u5024\u3092\u793a\u3059\u3068\u304d\u306f\u6839\u62e0\u304c\u306a\u3051\u308c\u3070\u300c\u4f8b\u300d\u3068\u660e\u8a18\u3059\u308b\u3002",
-        "- \u4f01\u753b\u66f8\u306b\u300c\u672a\u5b9a\u300d\u304c\u591a\u3044\u5834\u5408\u306f\u3001\u57cb\u3081\u308b\u3079\u304d\u7a7a\u6b04\u3068\u5fc5\u8981\u306a\u30a8\u30d3\u30c7\u30f3\u30b9\u3092\u4f18\u5148\u5ea6\u9806\u3067\u793a\u3059\u3002",
-        "- \u6587\u4f53\u306f\u8aad\u307f\u3084\u3059\u3044\u300c\u3067\u3059\u30fb\u307e\u3059\u8abf\u300d\u306b\u3057\u30011\u6587\u309250\u6587\u5b57\u524d\u5f8c\u306e\u77ed\u6587\u4e2d\u5fc3\u3067\u66f8\u304f\u3002",
-        "- overall_review \u306f 3\u301c5 \u6587\u3067\u6bb5\u843d\u69cb\u6210\u306b\u3059\u308b\u3002"
-    ].join("\n");
+const listMissingConcepts = (
+  draft: ProposalDraft,
+  mapping: Partial<Record<ProposalCsvConceptKey, string>>
+): ProposalCsvConceptKey[] => {
+  const missing: ProposalCsvConceptKey[] = [];
+  if (!mapping.proposal_id) missing.push("proposal_id");
+  if (!mapping.municipality_code) missing.push("municipality_code");
+  if (!draft.title) missing.push("title");
+  if (!draft.purpose) missing.push("issue");
+  if (!draft.target) missing.push("target");
+  if (!draft.content) missing.push("solution");
+  if (!draft.kpi) missing.push("kpi");
+  if (!draft.budget) missing.push("budget");
+  if (!draft.period) missing.push("period");
+  if (!draft.evidence) missing.push("premise");
+  return missing;
+};
+
+const conceptLabel: Record<ProposalCsvConceptKey, string> = {
+  proposal_id: "企画識別子",
+  municipality_code: "自治体コード",
+  title: "タイトル",
+  issue: "課題",
+  target: "対象",
+  solution: "解決策",
+  kpi: "KPI",
+  budget: "予算",
+  period: "期間",
+  premise: "前提"
+};
+
+const parseLooseJson = (raw: string): unknown => {
+  const trimmed = raw.trim();
+  const normalized = trimmed
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "");
+  try {
+    return JSON.parse(normalized);
+  } catch {
+    const start = normalized.indexOf("{");
+    const end = normalized.lastIndexOf("}");
+    if (start !== -1 && end !== -1 && end > start) {
+      return JSON.parse(normalized.slice(start, end + 1));
+    }
+    throw new Error("GEMINI_INVALID_JSON");
+  }
+};
+
+const normalizeCsvGeminiResponse = (
+  value: unknown,
+  fallbackOverall: string
+): ProposalCsvGeminiResponse => {
+  const parsed = (value ?? {}) as Partial<ProposalCsvGeminiResponse>;
+  const findingsRaw = Array.isArray(parsed.findings) ? parsed.findings : [];
+  const findings: ProposalCsvGeminiFinding[] = findingsRaw
+    .filter((item): item is ProposalCsvGeminiFinding => Boolean(item && typeof item === "object"))
+    .map((item) => {
+      const importance = item.importance === "高" || item.importance === "中" || item.importance === "低" ? item.importance : "中";
+      const classification = item.classification === "強み" || item.classification === "弱み" ? item.classification : "弱み";
+      return {
+        section: String(item.section ?? "総評"),
+        importance,
+        issue: String(item.issue ?? ""),
+        suggestion: String(item.suggestion ?? ""),
+        classification,
+        alternative: String(item.alternative ?? "")
+      };
+    })
+    .filter((item) => item.issue.trim().length > 0 || item.suggestion.trim().length > 0);
+
+  const overall = typeof parsed.overall === "string" && parsed.overall.trim().length > 0 ? parsed.overall : fallbackOverall;
+  return { overall, findings };
+};
+
+const normalizeCsvGeminiBatchResponse = (
+  value: unknown,
+  fallbackByProposalId: Map<string, string>
+): Map<string, ProposalCsvGeminiResponse> => {
+  const parsed = (value ?? {}) as Partial<ProposalCsvGeminiBatchResponse>;
+  const results = Array.isArray(parsed.results) ? parsed.results : [];
+  const adviceByProposalId = new Map<string, ProposalCsvGeminiResponse>();
+  for (const item of results) {
+    const proposalId = typeof item?.proposal_id === "string" ? item.proposal_id.trim() : "";
+    if (!proposalId) continue;
+    const fallbackOverall = fallbackByProposalId.get(proposalId) ?? "総評: 類似政策を根拠に改善可能です。";
+    const normalized = normalizeCsvGeminiResponse(
+      { overall: item.overall, findings: item.findings },
+      fallbackOverall
+    );
+    adviceByProposalId.set(proposalId, normalized);
+  }
+  return adviceByProposalId;
+};
+
+const truncateText = (value: string, limit: number): string => {
+  const text = value.trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}...`;
+};
+
+const isGeminiRateLimitError = (error: unknown): boolean => {
+    if (!(error instanceof Error)) return false;
+    return error.message.startsWith("GEMINI_RATE_LIMIT:429:");
+};
+
+const formatGeminiDisabledReason = (error: unknown): string => {
+    if (!(error instanceof Error)) return "Geminiが利用できないため、ルールベースで添削しました。";
+    if (error.message.startsWith("GEMINI_RATE_LIMIT:429:")) {
+        const retryAfter = error.message.replace("GEMINI_RATE_LIMIT:429:", "").trim();
+        if (retryAfter.length > 0) {
+            return `Gemini利用上限のため、ルールベースで添削しました（再試行目安: ${retryAfter} 秒後）。`;
+        }
+        return "Gemini利用上限のため、ルールベースで添削しました。";
+    }
+    if (error.message === "GEMINI_API_KEY_MISSING") {
+        return "Gemini APIキー未設定のため、ルールベースで添削しました。";
+    }
+    return "Geminiが利用できないため、ルールベースで添削しました。";
 };
 
 const callGemini = async (prompt: string): Promise<string> => {
@@ -700,8 +878,12 @@ const callGemini = async (prompt: string): Promise<string> => {
                     },
                     "Gemini API attempt failed."
                 );
-                // Retry when endpoint/model is likely missing or this model is rate limited.
-                if (response.status === 404 || response.status === 429) {
+                // Retry only when endpoint/model is likely missing.
+                // For 429, stop immediately to avoid per-row retry storms.
+                if (response.status === 429) {
+                    throw new Error(lastErrorCode);
+                }
+                if (response.status === 404) {
                     continue;
                 }
                 throw new Error(lastErrorCode);
@@ -719,276 +901,6 @@ const callGemini = async (prompt: string): Promise<string> => {
     }
 
     throw new Error(lastErrorCode || `GEMINI_API_FAILED:404:Not Found:${lastAttemptUrl}`);
-};
-
-const parseReviewJson = (raw: string): ProposalReviewResponse => {
-    const trimmed = raw.trim();
-    const normalized = trimmed
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/\s*```$/i, "");
-
-    const tryParse = (text: string): ProposalReviewResponse | null => {
-        try {
-            return JSON.parse(text) as ProposalReviewResponse;
-        } catch {
-            return null;
-        }
-    };
-
-    const direct = tryParse(normalized);
-    if (direct) return direct;
-
-    const start = normalized.indexOf("{");
-    const end = normalized.lastIndexOf("}");
-    if (start !== -1 && end !== -1 && end > start) {
-        const sliced = normalized.slice(start, end + 1);
-        const recovered = tryParse(sliced);
-        if (recovered) return recovered;
-    }
-
-    throw new Error("GEMINI_INVALID_JSON");
-};
-
-const normalizeReviewResponse = (
-    value: unknown,
-    proposalDraft: ProposalDraft,
-    similarItems: ProposalReviewItem[]
-): ProposalReviewResponse => {
-    const parsed = (value ?? {}) as Partial<ProposalReviewResponse> & {
-        advice?: {
-            kpi_suggestions?: string[];
-            risks?: string[];
-            implementation_steps?: string[];
-            budget_notes?: string[];
-            evaluation_plan?: string[];
-        };
-    };
-    const safeList = (items: unknown, fallback: string[] = []): string[] =>
-        Array.isArray(items) ? items.map((item) => String(item)).filter((item) => item.trim().length > 0) : fallback;
-    const safeText = (text: unknown, fallback = ""): string => (typeof text === "string" ? text : fallback);
-
-    const revised = parsed.revised_proposal ?? proposalDraft;
-    const overallReview =
-        safeText(parsed.overall_review) ||
-        safeList(parsed.advice?.kpi_suggestions).join(" ") ||
-        "類似施策の根拠を踏まえ、企画の目的・対象・実施手順をさらに具体化すると実行可能性が向上します。";
-
-    const response: ProposalReviewResponse = {
-        revised_proposal: {
-            title: safeText(revised.title, proposalDraft.title),
-            purpose: safeText(revised.purpose, proposalDraft.purpose),
-            target: safeText(revised.target, proposalDraft.target),
-            content: safeText(revised.content, proposalDraft.content),
-            kpi: safeText(revised.kpi, proposalDraft.kpi),
-            budget: safeText(revised.budget, proposalDraft.budget),
-            period: safeText(revised.period, proposalDraft.period),
-            evidence: safeText(revised.evidence, proposalDraft.evidence)
-        },
-        diff: Array.isArray(parsed.diff)
-            ? parsed.diff.filter((item): item is { field: keyof ProposalDraft; before: string; after: string } => {
-                if (!item || typeof item !== "object") return false;
-                const field = (item as { field?: unknown }).field;
-                const before = (item as { before?: unknown }).before;
-                const after = (item as { after?: unknown }).after;
-                return (
-                    typeof field === "string" &&
-                    ["title", "purpose", "target", "content", "kpi", "budget", "period", "evidence"].includes(field) &&
-                    typeof before === "string" &&
-                    typeof after === "string"
-                );
-            })
-            : [],
-        overall_review: overallReview,
-        fit_analysis: {
-            good_points: safeList(parsed.fit_analysis?.good_points, safeList(parsed.advice?.kpi_suggestions).slice(0, 3)),
-            weak_points: safeList(parsed.fit_analysis?.weak_points, safeList(parsed.advice?.risks).slice(0, 3)),
-            matching_points: safeList(
-                parsed.fit_analysis?.matching_points,
-                safeList(parsed.advice?.implementation_steps).slice(0, 3)
-            ),
-            non_matching_points: safeList(
-                parsed.fit_analysis?.non_matching_points,
-                safeList(parsed.advice?.budget_notes).slice(0, 3)
-            )
-        },
-        improvement_actions: safeList(
-            parsed.improvement_actions,
-            safeList(parsed.advice?.evaluation_plan, ["実行スケジュールと評価基準を明記し、段階的に検証してください。"])
-        ),
-        citations: Array.isArray(parsed.citations)
-            ? parsed.citations.map((item) => ({
-                source_id: safeText(item.source_id, ""),
-                municipality: safeText(item.municipality, "不明"),
-                year: typeof item.year === "number" ? item.year : null,
-                quote: safeText(item.quote, ""),
-                used_for: safeText(item.used_for, "参考根拠")
-            }))
-            : similarItems.slice(0, 3).map((item) => ({
-                source_id: item.id,
-                municipality: "不明",
-                year: null,
-                quote: item.evidenceText.slice(0, 120),
-                used_for: "参考根拠"
-            }))
-    };
-    response.advice = {
-        kpi_suggestions: response.fit_analysis.good_points,
-        risks: response.fit_analysis.weak_points,
-        implementation_steps: response.fit_analysis.matching_points,
-        budget_notes: response.fit_analysis.non_matching_points,
-        evaluation_plan: response.improvement_actions
-    };
-    return response;
-};
-
-const buildFallbackReviewResponse = (
-    proposalDraft: ProposalDraft,
-    similarItems: ProposalReviewItem[],
-    raw: string
-): ProposalReviewResponse => {
-    const normalize = (text: string): string =>
-        text
-            .toLowerCase()
-            .replace(/[^\p{L}\p{N}]+/gu, " ")
-            .trim();
-    const tokenize = (text: string): string[] => {
-        const stopwords = new Set([
-            "する", "した", "して", "ある", "いる", "ため", "こと", "もの", "これ", "それ", "また",
-            "及び", "など", "です", "ます", "から", "まで", "よう", "with", "from", "this", "that"
-        ]);
-        return normalize(text)
-            .split(/\s+/)
-            .filter((token) => token.length >= 2 && !stopwords.has(token))
-            .slice(0, 120);
-    };
-    const unique = (list: string[]): string[] => Array.from(new Set(list.filter((item) => item.trim().length > 0)));
-
-    const normalizedLines = raw
-        .replace(/```json/gi, "")
-        .replace(/```/g, "")
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .map((line) => line.replace(/^[-*]\s*/, ""))
-        .map((line) => line.replace(/^#+\s*/, ""))
-        .filter((line) => line.length > 0);
-    const isTruncated = raw.trim().endsWith("##") || raw.trim().endsWith("#");
-
-    const proposalText = [
-        proposalDraft.title,
-        proposalDraft.purpose,
-        proposalDraft.target,
-        proposalDraft.content,
-        proposalDraft.kpi,
-        proposalDraft.budget,
-        proposalDraft.period,
-        proposalDraft.evidence
-    ].join(" ");
-    const proposalTokens = unique(tokenize(proposalText)).slice(0, 40);
-
-    const evidenceByItem = similarItems.map((item) => {
-        const tokens = unique(tokenize(item.evidenceText));
-        const overlap = tokens.filter((token) => proposalTokens.includes(token));
-        return {
-            id: item.id,
-            text: item.evidenceText,
-            tokens,
-            overlap,
-            overlapScore: overlap.length
-        };
-    });
-    evidenceByItem.sort((a, b) => b.overlapScore - a.overlapScore);
-    const strongMatches = evidenceByItem.slice(0, 3);
-    const weakMatches = evidenceByItem.slice(-3).reverse();
-
-    const fieldCandidates: Array<{ key: keyof ProposalDraft; label: string }> = [
-        { key: "purpose", label: "目的" },
-        { key: "target", label: "対象" },
-        { key: "content", label: "施策内容" },
-        { key: "kpi", label: "KPI" },
-        { key: "budget", label: "予算" },
-        { key: "period", label: "期間" },
-        { key: "evidence", label: "根拠" }
-    ];
-
-    const missingFields = fieldCandidates.filter((field) => {
-        const value = proposalDraft[field.key].trim();
-        return value.length < 6 || value.includes("未定");
-    });
-
-    const matchingPoints = unique(
-        strongMatches
-            .filter((item) => item.overlapScore > 0)
-            .map((item) => {
-                const keys = item.overlap.slice(0, 4).join("・");
-                return `根拠施策(${item.id})と「${keys || "主要テーマ"}」が一致しています。`;
-            })
-    );
-    const nonMatchingPoints = unique([
-        ...weakMatches.map((item) => `根拠施策(${item.id})は文脈一致が弱く、直接比較には追加根拠が必要です。`),
-        ...missingFields.slice(0, 2).map((item) => `${item.label}が未定または不足のため、類似施策との厳密比較ができていません。`)
-    ]);
-    const goodPoints = unique([
-        proposalDraft.title.trim().length > 3 ? "企画タイトルがテーマを明示しており、方針の軸が見えます。" : "",
-        proposalTokens.length >= 8 ? "企画書内のキーワード量が一定あり、比較分析の入力として成立しています。" : "",
-        strongMatches.length > 0 ? `類似施策上位${strongMatches.length}件で重複キーワードが検出され、方向性の整合が確認できます。` : ""
-    ]);
-    const weakPoints = unique([
-        ...missingFields.map((item) => `${item.label}の具体性が不足しています。`),
-        proposalDraft.evidence.includes("未定") ? "根拠が未確定のため、採択時の説明責任が弱くなります。" : ""
-    ]);
-
-    const improvementActions = unique([
-        "1週間以内: 目的・対象・実施範囲を1ページで定義し、関係部署レビューを完了する（成果物: 企画要件定義書）。",
-        "2週間以内: 上位類似施策3件からKPI候補を抽出し、測定式と基準値を設定する（成果物: KPI設計表）。",
-        "3週間以内: 予算を初期費用/運用費に分割して積算し、財源案を2パターン作成する（成果物: 予算試算表）。",
-        "4週間以内: 実施工程を準備・試行・本実施・評価の4段階で作成し、責任者を割り当てる（成果物: 実行計画表）。",
-        "月次: 進捗・成果・リスクを定例評価し、改善アクションを更新する（成果物: 月次モニタリング報告）。"
-    ]);
-
-    const summaryHead = normalizedLines.slice(0, 3).join(" ");
-    const overallReview = [
-        summaryHead ? `AI出力要約: ${summaryHead}` : "",
-        `本企画は「${proposalDraft.title}」として方向性は妥当ですが、${missingFields.length > 0 ? missingFields.map((item) => item.label).join("・") : "根拠の具体化"}の補強が採択可否を左右します。`,
-        `類似施策との照合では、上位一致要素として${matchingPoints.slice(0, 2).join(" / ") || "テーマ整合"}が確認できる一方、${nonMatchingPoints.slice(0, 2).join(" / ") || "比較粒度不足"}が課題です。`,
-        "次段階では、KPI・予算・実施工程を数値と期限付きで確定し、根拠資料との対応表を用意することで提案の説得力を高められます。"
-    ].filter((line) => line.length > 0).join(" ");
-
-    const firstEvidence = similarItems[0]?.evidenceText?.trim() ?? "";
-    const evidenceSummary = firstEvidence ? firstEvidence.slice(0, 180) : "類似施策の根拠テキストを参照してください。";
-    const aiMemo =
-        `${overallReview}\n\n[根拠サマリ]\n${evidenceSummary}` +
-        (isTruncated ? "\n\n[注意]\nAIの出力が途中で終了した可能性があります。" : "");
-    const revisedEvidence = `${proposalDraft.evidence}\n\n[AI補助メモ]\n${aiMemo}`;
-
-    return {
-        revised_proposal: {
-            ...proposalDraft,
-            evidence: revisedEvidence
-        },
-        diff: [
-            {
-                field: "evidence",
-                before: proposalDraft.evidence,
-                after: revisedEvidence
-            }
-        ],
-        overall_review: overallReview,
-        fit_analysis: {
-            good_points: goodPoints.length > 0 ? goodPoints : ["企画の方向性自体は政策テーマとして妥当です。"],
-            weak_points: weakPoints.length > 0 ? weakPoints : ["比較根拠の補強が必要です。"],
-            matching_points: matchingPoints.length > 0 ? matchingPoints : ["上位類似施策との方向性は概ね一致しています。"],
-            non_matching_points: nonMatchingPoints.length > 0 ? nonMatchingPoints : ["比較対象と目的の粒度差を追加確認してください。"]
-        },
-        improvement_actions: improvementActions,
-        citations: similarItems.slice(0, 3).map((item) => ({
-            source_id: item.id,
-            municipality: "不明",
-            year: null,
-            quote: item.evidenceText.slice(0, 120),
-            used_for: "参考根拠"
-        }))
-    };
 };
 
 app.post<{ Body: { municipalityCode: string } }>("/api/auth/login", async (request, reply) => {
@@ -1019,256 +931,276 @@ app.post("/api/auth/logout", async (_request, reply) => {
   return { success: true };
 });
 
-app.post<{ Body: ProposalSimilarRequest }>("/api/proposals/similar", async (request, reply) => {
-    const municipality = requireSession(request, reply);
-    if (!municipality) return;
-
-    const body = request.body as ProposalSimilarRequest | undefined;
-    if (!body || !validateProposalDraft(body.proposalDraft)) {
-        return reply.code(400).send({
-            error: {
-                code: "INVALID_INPUT",
-                message: "企画書の入力が不正です。",
-            },
-        });
-    }
-
-    const topK = Math.min(Math.max(Number(body.topK ?? 5), 1), 50);
-    const normalizedDraft = normalizeProposalDraft(body.proposalDraft);
-    const draftText = proposalDraftToText(normalizedDraft);
-    const baseCode = body.municipalityCode?.trim() || municipality.code;
-
-    const similarCitiesFromSimilarity = await buildSimilarCitiesFromSimilarity(baseCode, draftText);
-    const similarCities = similarCitiesFromSimilarity ?? buildFallbackSimilarCities(baseCode, draftText, Object.keys(municipalities).length);
-    const cityCandidateCount = Math.min(similarCities.length, Math.max(topK * 5, 20));
-    const topCities = similarCities.slice(0, cityCandidateCount);
-    const topCityCodes = new Set(topCities.map((city) => normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode));
-    const filteredPolicies = policies.filter((policy) => {
-        const code = normalizeToCdArea(policy.municipalityCode) ?? policy.municipalityCode;
-        return topCityCodes.has(code);
-    });
-    if (topCities.length === 0 || filteredPolicies.length === 0) {
-        app.log.warn(
-            {
-                baseCode,
-                topCities: topCities.length,
-                policiesTotal: policies.length,
-                filteredPolicies: filteredPolicies.length
-            },
-            "No matching policies for similar cities."
-        );
-    }
-    const policiesForSimilar = filteredPolicies.length > 0 ? filteredPolicies : policies;
-    const notice =
-        filteredPolicies.length > 0
-            ? null
-            : "類似自治体の施策が見つからないため、全自治体から候補を抽出しました。";
-
-    const cityScoreByCode = new Map(
-        similarCities.map((city) => [normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode, city.score])
-    );
-    const CITY_WEIGHT = 0.6;
-    const TEXT_WEIGHT = 0.4;
-
-    const similarItems: ProposalSimilarItem[] = policiesForSimilar
-        .map((policy) => {
-            const policyCode = normalizeToCdArea(policy.municipalityCode) ?? policy.municipalityCode;
-            const cityScore = normalizeCitySimilarity(cityScoreByCode.get(policyCode) ?? 0);
-            const policyText = `${policy.title} ${policy.summary} ${policy.details} ${(policy.keywords ?? []).join(" ")}`.trim();
-            const textScore = calcTextSimilarity(draftText, policyText);
-            const combinedScore = cityScore * CITY_WEIGHT + textScore * TEXT_WEIGHT;
-            return {
-                id: policy.id,
-                score: combinedScore,
-                municipality: policy.municipalityName,
-                year: null,
-                title: policy.title,
-                summary: policy.summary,
-                evidenceSnippets: [extractEvidenceSnippet(policy, draftText)]
-            };
-        })
-        .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
-        .slice(0, topK);
-
-    return { similarItems, notice };
-});
-
-app.post<{ Body: ProposalReviewRequest }>("/api/proposals/review", async (request, reply) => {
-    const municipality = requireSession(request, reply);
-    if (!municipality) return;
-
-    const body = request.body as ProposalReviewRequest | undefined;
-    if (!body || !validateProposalDraft(body.proposalDraft) || !validateReviewItems(body.similarItems)) {
-        return reply.code(400).send({
-            error: {
-                code: "INVALID_INPUT",
-                message: "企画書または根拠の入力が不正です。",
-            },
-        });
-    }
-
-    const style = body.style ?? "gentle";
-    const length = body.length ?? "medium";
-    const prompt = buildReviewPrompt(body.proposalDraft, body.similarItems, style, length);
-
-    try {
-        const raw = await callGemini(prompt);
-        try {
-            const parsed = parseReviewJson(raw);
-            return normalizeReviewResponse(parsed, body.proposalDraft, body.similarItems);
-        } catch (parseError) {
-            app.log.warn(
-                {
-                    err: parseError,
-                    rawPreview: raw.slice(0, 1200)
-                },
-                "Gemini response was not valid JSON. Fallback response generated."
-            );
-            const fallback = buildFallbackReviewResponse(body.proposalDraft, body.similarItems, raw);
-            return normalizeReviewResponse(fallback, body.proposalDraft, body.similarItems);
-        }
-    } catch (error) {
-        app.log.error({ err: error }, "Gemini review failed.");
-        const message = error instanceof Error ? error.message : "REVIEW_FAILED";
-        const code =
-            message === "GEMINI_API_KEY_MISSING"
-                ? "MISSING_API_KEY"
-                : message === "GEMINI_INVALID_JSON"
-                    ? "INVALID_JSON"
-                    : message.startsWith("GEMINI_RATE_LIMIT")
-                        ? "RATE_LIMIT"
-                    : message.startsWith("GEMINI_API_FAILED")
-                        ? "GEMINI_API_FAILED"
-                        : "REVIEW_FAILED";
-        const userMessage =
-            code === "MISSING_API_KEY"
-                ? "Gemini APIキーが設定されていません。"
-                : code === "INVALID_JSON"
-                    ? "Geminiの応答が不正な形式でした。"
-                    : code === "RATE_LIMIT"
-                        ? "Gemini APIの利用上限に達しました。時間をおいて再実行するか、プラン/課金設定を確認してください。"
-                    : code === "GEMINI_API_FAILED"
-                        ? `Gemini APIの呼び出しに失敗しました。${message}`
-                        : "添削/アドバイスの生成に失敗しました。";
-        return reply.code(500).send({ error: { code, message: userMessage } });
-    }
-});
-
-app.post<{ Body: ProposalPdfRequest }>("/api/proposals/pdf", async (request, reply) => {
+app.post("/api/proposals/review-csv", async (request, reply) => {
+  refreshPoliciesCache();
   const municipality = requireSession(request, reply);
   if (!municipality) return;
 
-  const title = (request.body?.title ?? "").trim() || "企画書";
-  const sections = Array.isArray(request.body?.sections) ? request.body.sections : [];
-
-  const pdfDoc = await PDFDocument.create();
-  pdfDoc.registerFontkit(fontkit);
-  const pageSize: [number, number] = [595.28, 841.89]; // A4
-  let page = pdfDoc.addPage(pageSize);
-  const [pageWidth, pageHeight] = pageSize;
-
-  const fontPathFromEnv = process.env.PROPOSAL_PDF_FONT_PATH?.trim();
-  const fontPathCandidates = [
-    fontPathFromEnv,
-    resolve(rootDir, "data/fonts/NotoSansJP-Regular.ttf"),
-    resolve(rootDir, "data/fonts/NotoSansJP-Regular.otf"),
-    resolve(rootDir, "data/fonts/Meiryo.ttc")
-  ].filter((value): value is string => Boolean(value));
-  const fontPath = fontPathCandidates.find((candidate) => existsSync(candidate));
-  if (!fontPath) {
-    return reply.code(500).send({
-      message:
-        "日本語フォントの読み込みに失敗しました。data/fonts/NotoSansJP-Regular.ttf を配置してください。",
-    });
-  }
-  if (fontPath.toLowerCase().endsWith(".ttc")) {
-    return reply.code(500).send({
-      message:
-        "TTC形式のフォントは利用できません。TTF/OTFの日本語フォントを指定してください。",
+  const file = await request.file();
+  if (!file) {
+    return reply.code(400).send({
+      error: { code: "INVALID_INPUT", message: "CSVファイルを添付してください。" }
     });
   }
 
-  let fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  let fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  try {
-    const fontBytes = readFileSync(fontPath);
-    fontRegular = await pdfDoc.embedFont(fontBytes);
-    fontBold = await pdfDoc.embedFont(fontBytes);
-  } catch (error) {
-    app.log.error({ err: error, fontPath }, "Failed to load custom font.");
-    return reply.code(500).send({
-      message:
-        "日本語フォントの読み込みに失敗しました。フォントファイルを確認してください。",
+  const filename = (file.filename ?? "").toLowerCase();
+  if (filename && !filename.endsWith(".csv")) {
+    return reply.code(400).send({
+      error: { code: "INVALID_INPUT", message: "CSVファイルのみアップロード可能です。" }
     });
   }
 
-  const margin = 48;
-  let cursorY = pageHeight - margin;
+  const csvText = (await file.toBuffer()).toString("utf-8");
+  const { headers, rows } = parseCsvText(csvText);
+  if (headers.length === 0 || rows.length === 0) {
+    return reply.code(400).send({
+      error: { code: "INVALID_INPUT", message: "CSVのヘッダーまたはデータ行が見つかりません。" }
+    });
+  }
 
-  const ensureSpace = (lineHeight: number) => {
-    if (cursorY - lineHeight < margin) {
-      page = pdfDoc.addPage(pageSize);
-      cursorY = pageHeight - margin;
+  const mapping = inferProposalCsvMapping(headers);
+  const outputRows: ProposalCsvReviewRow[] = [];
+  let geminiDisabledForRequest = false;
+  let geminiDisabledReason = "";
+  const rowContexts: Array<{
+    proposalId: string;
+    municipalityCode: string;
+    draft: ProposalDraft;
+    missing: ProposalCsvConceptKey[];
+    scoredPolicies: Array<{ policy: Policy; combinedScore: number; textScore: number; cityScore: number }>;
+    combinedEvidence: string;
+    fallbackOverallBase: string;
+    metricEvidence: string;
+    policyEvidence: string;
+  }> = [];
+
+  for (const row of rows) {
+    const draft = buildDraftFromCsvRow(row, mapping);
+    const draftText = proposalDraftToText(draft);
+    const proposalId = getRowValue(row, mapping, "proposal_id") || `row-${row.rowNumber - 1}`;
+    const sourceCode = getRowValue(row, mapping, "municipality_code") || municipality.code;
+    const municipalityCode = normalizeToCdArea(sourceCode) ?? municipality.code;
+
+    const similarCitiesFromSimilarity = await buildSimilarCitiesFromSimilarity(municipalityCode, draftText);
+    const similarCities = similarCitiesFromSimilarity ?? buildFallbackSimilarCities(municipalityCode, draftText, 50);
+    const topCityCodes = new Set(
+      similarCities
+        .slice(0, 20)
+        .map((city) => normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode)
+    );
+    const filteredPolicies = policies.filter((policy) => {
+      const code = normalizeToCdArea(policy.municipalityCode) ?? policy.municipalityCode;
+      return topCityCodes.has(code);
+    });
+    const candidatePolicies = filteredPolicies.length > 0 ? filteredPolicies : policies;
+    const cityScoreByCode = new Map(
+      similarCities.map((city) => [normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode, city.score])
+    );
+
+    const scoredPolicies = candidatePolicies
+      .map((policy) => {
+        const policyCode = normalizeToCdArea(policy.municipalityCode) ?? policy.municipalityCode;
+        const cityScore = normalizeCitySimilarity(cityScoreByCode.get(policyCode) ?? 0);
+        const policyText = `${policy.title} ${policy.summary} ${policy.details} ${(policy.keywords ?? []).join(" ")}`.trim();
+        const textScore = calcTextSimilarity(draftText, policyText);
+        const combinedScore = cityScore * 0.6 + textScore * 0.4;
+        return { policy, combinedScore, textScore, cityScore };
+      })
+      .sort((a, b) => b.combinedScore - a.combinedScore)
+      .slice(0, 3);
+
+    let metricEvidence = "";
+    try {
+      const municipalData = await similarityClient.municipalityData(municipalityCode);
+      const metricPairs = Object.entries(municipalData.indicators)
+        .filter(([, value]) => Number.isFinite(value))
+        .slice(0, 5)
+        .map(([key, value]) => `${key}=${value}`);
+      metricEvidence = metricPairs.join("; ");
+    } catch {
+      metricEvidence = "";
     }
-  };
 
-  const drawLine = (text: string, fontSize: number, font = fontRegular, color = rgb(0, 0, 0)) => {
-    ensureSpace(fontSize * 1.4);
-    page.drawText(text, {
-      x: margin,
-      y: cursorY,
-      size: fontSize,
-      font,
-      color
+    const policyEvidence = scoredPolicies.length
+      ? scoredPolicies
+          .map(
+            (item) =>
+              `${item.policy.id}:${item.policy.title}(score=${item.combinedScore.toFixed(3)}, text=${item.textScore.toFixed(3)}, city=${item.cityScore.toFixed(3)})`
+          )
+          .join(" | ")
+      : "";
+    const combinedEvidence = [metricEvidence ? `自治体指標:${metricEvidence}` : "", policyEvidence ? `類似政策:${policyEvidence}` : ""]
+      .filter((v) => v.length > 0)
+      .join(" / ");
+
+    const missing = listMissingConcepts(draft, mapping);
+    const fallbackOverallBase = `総評: 不足項目${missing.length}件。類似政策上位${scoredPolicies.length}件を根拠に改善可能です。`;
+    rowContexts.push({
+      proposalId,
+      municipalityCode,
+      draft,
+      missing,
+      scoredPolicies,
+      combinedEvidence,
+      fallbackOverallBase,
+      metricEvidence,
+      policyEvidence
     });
-    cursorY -= fontSize * 1.4;
-  };
+  }
 
-  const wrapText = (text: string, fontSize: number, maxWidth: number, font = fontRegular) => {
-    const lines: string[] = [];
-    const paragraphs = text.split(/\r?\n/);
-    for (const para of paragraphs) {
-      if (!para.trim()) {
-        lines.push("");
-        continue;
+  const fallbackByProposalId = new Map(rowContexts.map((ctx) => [ctx.proposalId, ctx.fallbackOverallBase]));
+  const geminiAdviceByProposalId = new Map<string, ProposalCsvGeminiResponse>();
+
+  if (!geminiDisabledForRequest) {
+    const geminiRows = rowContexts.map((ctx) => ({
+      proposal_id: ctx.proposalId,
+      municipality_code: ctx.municipalityCode,
+      draft: {
+        title: truncateText(ctx.draft.title, 140),
+        issue: truncateText(ctx.draft.purpose, 220),
+        target: truncateText(ctx.draft.target, 140),
+        solution: truncateText(ctx.draft.content, 260),
+        kpi: truncateText(ctx.draft.kpi, 140),
+        budget: truncateText(ctx.draft.budget, 120),
+        period: truncateText(ctx.draft.period, 120),
+        premise: truncateText(ctx.draft.evidence, 180)
+      },
+      missing_fields: ctx.missing.map((key) => conceptLabel[key]),
+      top_policies: ctx.scoredPolicies.slice(0, 3).map((item) => ({
+        id: item.policy.id,
+        title: truncateText(item.policy.title, 120),
+        score: Number(item.combinedScore.toFixed(3)),
+        summary: truncateText(item.policy.summary, 180)
+      })),
+      indicators: truncateText(ctx.metricEvidence, 300)
+    }));
+
+    try {
+      const geminiPrompt = [
+        "あなたは自治体政策の添削官です。入力企画・類似政策・自治体指標のみを根拠に助言してください。",
+        "入力は複数件です。各proposal_idごとに評価結果を返してください。",
+        "類似自治体が過去に行った企画事業に似た事例をWebで検索し参考にせよ。",
+        "根拠にない断定は禁止。JSONのみを返してください。",
+        "",
+        "## 入力データ(JSON)",
+        JSON.stringify(geminiRows, null, 2),
+        "",
+        "## 出力JSON schema",
+        '{ "results": [ { "proposal_id": "string", "overall": "string", "findings": [ { "section": "string", "importance": "高|中|低", "issue": "string", "suggestion": "string", "classification": "強み|弱み", "alternative": "string" } ] } ] }'
+      ].join("\n");
+
+      const raw = await callGemini(geminiPrompt);
+      const parsed = normalizeCsvGeminiBatchResponse(parseLooseJson(raw), fallbackByProposalId);
+      parsed.forEach((value, key) => {
+        geminiAdviceByProposalId.set(key, value);
+      });
+    } catch (err) {
+      if (isGeminiRateLimitError(err) || (err instanceof Error && err.message === "GEMINI_API_KEY_MISSING")) {
+        geminiDisabledForRequest = true;
+        geminiDisabledReason = formatGeminiDisabledReason(err);
       }
-      let line = "";
-      for (const char of Array.from(para)) {
-        const testLine = line + char;
-        if (font.widthOfTextAtSize(testLine, fontSize) > maxWidth && line) {
-          lines.push(line);
-          line = char;
-        } else {
-          line = testLine;
-        }
-      }
-      if (line) lines.push(line);
+      app.log.warn({ err, geminiDisabledForRequest }, "Gemini CSV batch advice failed. Fallback rules will be used.");
     }
-    return lines;
-  };
-
-  drawLine(title, 20, fontBold);
-  drawLine(`菴懈・閾ｪ豐ｻ菴・ ${municipality.name} (${municipality.code})`, 10, fontRegular, rgb(0.35, 0.35, 0.35));
-  drawLine(`作成日: ${new Date().toISOString().slice(0, 10)}`, 10, fontRegular, rgb(0.35, 0.35, 0.35));
-  cursorY -= 6;
-
-  const contentWidth = pageWidth - margin * 2;
-  for (const section of sections) {
-    const label = (section.label ?? "").trim();
-    const value = (section.value ?? "").trim();
-    if (!label || !value) continue;
-    drawLine(label, 13, fontBold);
-    const lines = wrapText(value, 11, contentWidth, fontRegular);
-    for (const line of lines) {
-      drawLine(line, 11, fontRegular);
-    }
-    cursorY -= 4;
   }
 
-  const pdfBytes = await pdfDoc.save();
-  reply.header("Content-Type", "application/pdf");
-  reply.header("Content-Disposition", "attachment; filename=\"proposal.pdf\"");
-  return reply.send(Buffer.from(pdfBytes));
+  for (const ctx of rowContexts) {
+    const fallbackReasonSuffix = geminiDisabledForRequest && geminiDisabledReason ? ` ${geminiDisabledReason}` : "";
+    const fallbackOverall = `${ctx.fallbackOverallBase}${fallbackReasonSuffix}`;
+    const geminiAdvice = geminiAdviceByProposalId.get(ctx.proposalId) ?? { overall: fallbackOverall, findings: [] };
+
+    if (geminiAdvice.findings.length > 0) {
+      geminiAdvice.findings.forEach((finding) => {
+        outputRows.push({
+          proposalId: ctx.proposalId,
+          municipalityCode: ctx.municipalityCode,
+          section: finding.section,
+          importance: finding.importance,
+          issue: finding.issue,
+          suggestion: finding.suggestion,
+          evidence: ctx.combinedEvidence || "根拠データ取得なし",
+          classification: finding.classification,
+          alternative: finding.alternative,
+          overall: ""
+        });
+      });
+    } else {
+      ctx.missing.forEach((missingKey) => {
+        outputRows.push({
+          proposalId: ctx.proposalId,
+          municipalityCode: ctx.municipalityCode,
+          section: conceptLabel[missingKey],
+          importance: "高",
+          issue: `${conceptLabel[missingKey]}が不足しています。`,
+          suggestion: `${conceptLabel[missingKey]}を具体値・根拠付きで追記してください。`,
+          evidence: ctx.combinedEvidence || "根拠データ取得なし",
+          classification: "弱み",
+          alternative: ctx.scoredPolicies[1]?.policy.title ?? "",
+          overall: ""
+        });
+      });
+      if (ctx.scoredPolicies[0]) {
+        outputRows.push({
+          proposalId: ctx.proposalId,
+          municipalityCode: ctx.municipalityCode,
+          section: "施策整合",
+          importance: "中",
+          issue: "類似政策との整合が確認できます。",
+          suggestion: `上位類似政策「${ctx.scoredPolicies[0].policy.title}」との差分を明確化してください。`,
+          evidence: ctx.combinedEvidence || "根拠データ取得なし",
+          classification: "強み",
+          alternative: ctx.scoredPolicies[1]?.policy.title ?? "",
+          overall: ""
+        });
+      }
+    }
+
+    outputRows.push({
+      proposalId: ctx.proposalId,
+      municipalityCode: ctx.municipalityCode,
+      section: "総評",
+      importance: ctx.missing.length > 0 ? "高" : "中",
+      issue: ctx.missing.length > 0 ? "入力不足により評価精度が低下しています。" : "主要項目は入力済みです。",
+      suggestion:
+        ctx.missing.length > 0
+          ? "不足項目を補完後、再度CSV添削を実行してください。"
+          : "強みを維持しつつ、類似政策との差分を実行計画に反映してください。",
+      evidence: ctx.combinedEvidence || "根拠データ取得なし",
+      classification: ctx.missing.length > 0 ? "弱み" : "強み",
+      alternative: ctx.scoredPolicies[2]?.policy.title ?? ctx.scoredPolicies[1]?.policy.title ?? "",
+      overall: geminiAdvice.overall
+    });
+  }
+
+  const outHeaders = [
+    "対象企画ID",
+    "自治体コード",
+    "指摘対象セクション",
+    "重要度",
+    "問題点",
+    "修正提案",
+    "根拠",
+    "強み弱み分類",
+    "代替案",
+    "総評"
+  ];
+  const outBody = outputRows.map((row) => ({
+    "対象企画ID": row.proposalId,
+    "自治体コード": row.municipalityCode,
+    "指摘対象セクション": row.section,
+    "重要度": row.importance,
+    "問題点": row.issue,
+    "修正提案": row.suggestion,
+    "根拠": row.evidence,
+    "強み弱み分類": row.classification,
+    "代替案": row.alternative,
+    "総評": row.overall
+  }));
+  const outputCsv = buildCsvOutput(outHeaders, outBody);
+  return {
+    filename: "proposal-review.csv",
+    csvContent: outputCsv,
+    rows: outputRows
+  };
 });
 
 app.post<{
@@ -1447,7 +1379,7 @@ app.post<{ Body: { token: string; selectedIds?: string[] } }>("/api/admin/import
       mergeToPoliciesJson: pending.mergeToPoliciesJson,
       selectedIds
     });
-    const latestRaw = readJsonWithFallback<RawPolicy[]>("policies.json", "policies.sample.json");
+    const latestRaw = readAllPolicies();
     policies = latestRaw.map(toPolicy);
     return { success: true, result };
   } catch (error) {
@@ -1494,7 +1426,7 @@ app.post<{ Body: { policyIds: string[] } }>("/api/admin/policies/delete", async 
   });
 
   writeFileSync(policiesPath, `${JSON.stringify(kept, null, 2)}\n`, "utf-8");
-  policies = kept.map(toPolicy);
+  policies = readAllPolicies().map(toPolicy);
   return { success: true, deletedCount: toDelete.length };
 });
 
@@ -1534,6 +1466,7 @@ app.get<{ Querystring: { query?: string; limit?: string } }>("/api/municipalitie
 });
 
 app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, reply) => {
+  refreshPoliciesCache();
   const municipality = requireSession(request, reply);
   if (!municipality) return;
 
@@ -1548,6 +1481,8 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   );
 
   const keywordMatched = policies.filter((policy) => {
+    // Exclude policies with missing PDF linkage from search results only.
+    if (!policy.pdfUrl) return false;
     if (!keyword) return true;
     const haystack = `${policy.title} ${policy.summary} ${policy.details} ${policy.keywords.join(" ")}`.toLowerCase();
     return haystack.includes(keyword);
@@ -1576,6 +1511,7 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
 });
 
 app.get<{ Params: { policyId: string } }>("/api/policies/:policyId", async (request, reply) => {
+  refreshPoliciesCache();
   const municipality = requireSession(request, reply);
   if (!municipality) return;
 
@@ -1603,4 +1539,6 @@ const start = async () => {
 };
 
 void start();
+
+
 

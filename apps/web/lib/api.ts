@@ -56,57 +56,23 @@ export type ImportPdfPreviewItem = {
   pageCount: number;
 };
 
-export type ProposalDraft = {
-    title: string;
-    purpose: string;
-    target: string;
-    content: string;
-    kpi: string;
-    budget: string;
-    period: string;
-    evidence: string;
+export type ProposalCsvReviewDownload = {
+  filename: string;
+  csvContent: string;
+  rows: ProposalCsvReviewRow[];
 };
 
-export type ProposalSimilarItem = {
-    id: string;
-    score: number;
-    municipality: string;
-    year: number | null;
-    title: string;
-    summary: string;
-    evidenceSnippets: string[];
-};
-
-export type ProposalReviewItem = {
-    id: string;
-    evidenceText: string;
-};
-
-export type ProposalReviewResponse = {
-    revised_proposal: ProposalDraft;
-    diff: Array<{ field: keyof ProposalDraft; before: string; after: string }>;
-    overall_review: string;
-    fit_analysis: {
-        good_points: string[];
-        weak_points: string[];
-        matching_points: string[];
-        non_matching_points: string[];
-    };
-    improvement_actions: string[];
-    advice?: {
-        kpi_suggestions: string[];
-        risks: string[];
-        implementation_steps: string[];
-        budget_notes: string[];
-        evaluation_plan: string[];
-    };
-    citations: Array<{
-        source_id: string;
-        municipality: string;
-        year: number | null;
-        quote: string;
-        used_for: string;
-    }>;
+export type ProposalCsvReviewRow = {
+  proposalId: string;
+  municipalityCode: string;
+  section: string;
+  importance: "高" | "中" | "低";
+  issue: string;
+  suggestion: string;
+  evidence: string;
+  classification: "強み" | "弱み";
+  alternative: string;
+  overall: string;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
@@ -241,15 +207,43 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ policyIds })
     }),
-  proposalSimilar: (payload: { proposalDraft: ProposalDraft; municipalityCode?: string; yearRange?: [number, number]; topK?: number }) =>
-    request<{ similarItems: ProposalSimilarItem[]; notice?: string | null }>("/api/proposals/similar", {
+  proposalReviewCsv: async (file: File): Promise<ProposalCsvReviewDownload> => {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch(`${API_BASE}/api/proposals/review-csv`, {
       method: "POST",
-      body: JSON.stringify(payload)
-    }),
-  proposalReview: (payload: { proposalDraft: ProposalDraft; similarItems: ProposalReviewItem[]; style?: "strict" | "gentle"; length?: "short" | "medium" | "long" }) =>
-    request<ProposalReviewResponse>("/api/proposals/review", {
-        method: "POST",
-        body: JSON.stringify(payload)
-    }),
+      credentials: "include",
+      body: form
+    });
+    if (!response.ok) {
+      let message = "Request failed";
+      try {
+        const payload = (await response.json()) as { message?: string; error?: { message?: string } };
+        if (payload?.error?.message) {
+          message = payload.error.message;
+        } else if (payload?.message) {
+          message = payload.message;
+        }
+      } catch {
+        // keep generic message
+      }
+      throw new Error(message);
+    }
+    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+    if (contentType.includes("application/json")) {
+      return (await response.json()) as ProposalCsvReviewDownload;
+    }
+
+    // Backward compatibility: old API may still return text/csv directly.
+    const csvContent = await response.text();
+    const disposition = response.headers.get("content-disposition") ?? "";
+    const match = disposition.match(/filename=\"?([^\";]+)\"?/i);
+    const filename = match?.[1] ?? "proposal-review.csv";
+    return {
+      filename,
+      csvContent,
+      rows: []
+    };
+  },
   policy: (policyId: string) => request<{ policy: Policy }>(`/api/policies/${policyId}`)
 };

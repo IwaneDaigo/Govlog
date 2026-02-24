@@ -34,6 +34,11 @@ export interface HealthResponse {
   areas_loaded: number;
 }
 
+export interface MunicipalityDataResponse {
+  cd_area: string;
+  indicators: Record<string, number>;
+}
+
 export class SimilarityApiError extends Error {
   constructor(
     public readonly status: number,
@@ -57,6 +62,10 @@ export class SimilarityClient {
 
   async similarity(req: SimilarityRequest): Promise<SimilarityResponse> {
     return this.post<SimilarityResponse>("/similarity", req);
+  }
+
+  async municipalityData(cdArea: string): Promise<MunicipalityDataResponse> {
+    return this.get<MunicipalityDataResponse>(`/municipality/${encodeURIComponent(cdArea)}`);
   }
 
   private async get<T>(path: string): Promise<T> {

@@ -69,19 +69,30 @@ const FALLBACK_TITLE_PREFIX = "\u4e8b\u696d";
 const normalizeText = (value: string): string => value.replace(/\s+/g, " ").trim();
 
 const extractNo = (text: string): string | null => {
-  const m = text.match(/(?:NO|No|no)\.?\s*([0-9]{1,4})/);
+  const m = text.match(/(?:NO|No|no|Ｎｏ|ＮＯ|ｎｏ)[\.\uff0e]?\s*([0-9]{1,4})/);
   return m?.[1] ?? null;
 };
 
 const extractNoFromItems = (items: PageTextItem[]): string | null => {
   const normalized = items.map((i) => ({ ...i, t: i.str.trim() })).filter((i) => i.t.length > 0);
 
-  const noLabel = normalized.find((i) => /^NO\.?$/i.test(i.t));
+  const noLabel = normalized.find((i) => /^(?:NO|No|no|Ｎｏ|ＮＯ|ｎｏ)[\.\uff0e]?$/i.test(i.t));
   if (noLabel) {
     const rightNum = normalized
-      .filter((i) => i.x > noLabel.x && Math.abs(i.y - noLabel.y) <= 6 && /^[0-9]{1,4}$/.test(i.t))
+      .filter((i) => i.x > noLabel.x && Math.abs(i.y - noLabel.y) <= 20 && /^[0-9]{1,4}$/.test(i.t))
       .sort((a, b) => a.x - b.x)[0];
     if (rightNum) return rightNum.t;
+
+    const belowNum = normalized
+      .filter(
+        (i) =>
+          Math.abs(i.x - noLabel.x) <= 40 &&
+          i.y < noLabel.y &&
+          noLabel.y - i.y <= 24 &&
+          /^[0-9]{1,4}$/.test(i.t)
+      )
+      .sort((a, b) => b.y - a.y)[0];
+    if (belowNum) return belowNum.t;
   }
 
   const topRightNum = normalized
@@ -96,7 +107,8 @@ const extractBusinessNameFromLabelLine = (items: PageTextItem[], label: string):
   if (!labelItem) return undefined;
 
   const lineItems = normalized
-    .filter((i) => Math.abs(i.y - labelItem.y) <= 3 && i.x > labelItem.x)
+    .filter((i) => Math.abs(i.y - labelItem.y) <= 6 && i.x > labelItem.x && i.x < 440)
+    .filter((i) => !/^(?:\u3010\u4e8b\u696d\u5b9f\u65bd\u671f\u9593\u3011|[\uff5e~]|(?:\uff08?\u4ee4\u548c[0-9\uff10-\uff19]+\u5e74\u5ea6\uff09?))$/.test(i.t))
     .sort((a, b) => a.x - b.x);
 
   if (lineItems.length === 0) return undefined;
