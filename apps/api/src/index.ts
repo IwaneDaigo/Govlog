@@ -531,10 +531,10 @@ const calcTextSimilarity = (left: string, right: string): number => {
 };
 
 const normalizeCitySimilarity = (score: number): number => {
-    const normalized = score <= 1 && score >= -1 ? (score + 1) / 2 : score;
+    // Keep 0..1 as-is; only remap -1..1 style negatives.
+    const normalized = score < 0 ? (score + 1) / 2 : score;
     return Math.max(0, Math.min(1, normalized));
 };
-
 
 const validateProposalDraft = (value: unknown): value is ProposalDraft => {
     if (!value || typeof value !== "object") return false;
@@ -1543,8 +1543,6 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   const similarCities = similarCitiesFromSimilarity ?? buildFallbackSimilarCities(municipality.code, rawKeyword, Object.keys(municipalities).length);
   const top5Cities = similarCities.slice(0, 5);
   const worstCities = similarCities.length > 20 ? [...similarCities].slice(-20).reverse() : [...similarCities].reverse();
-  const top5Set = new Set(top5Cities.map((city) => normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode));
-  const top5Rank = new Map(top5Cities.map((city, idx) => [normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode, idx]));
   const similarityScoreByCode = new Map(
     similarCities.map((city) => [normalizeToCdArea(city.municipalityCode) ?? city.municipalityCode, city.score])
   );

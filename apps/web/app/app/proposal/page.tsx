@@ -47,6 +47,7 @@ export default function ProposalPage() {
     const [submitting, setSubmitting] = useState(false);
     const [findingSimilar, setFindingSimilar] = useState(false);
     const [similarItems, setSimilarItems] = useState<ProposalSimilarItem[]>([]);
+    const [similarDraftSignature, setSimilarDraftSignature] = useState<string | null>(null);
     const [reviewing, setReviewing] = useState(false);
     const [reviewResult, setReviewResult] = useState<ProposalReviewResponse | null>(null);
     const [message, setMessage] = useState<string | null>(null);
@@ -58,10 +59,6 @@ export default function ProposalPage() {
             .then((res) => setMunicipality(res.municipality))
             .catch(() => router.push("/login"));
     }, [router]);
-
-    useEffect(() => {
-        if (!municipality) return;
-    }, [municipality, title]);
 
     useEffect(() => {
         return () => {
@@ -88,6 +85,7 @@ export default function ProposalPage() {
         period: fields.schedule?.trim() ?? "",
         evidence: fields.notes?.trim() ?? ""
     };
+    const draftSignature = JSON.stringify(proposalDraft);
 
     const validateDraft = (): string | null => {
         const requiredFields: Array<keyof ProposalDraft> = [
@@ -117,6 +115,7 @@ export default function ProposalPage() {
         try {
             const res = await api.proposalSimilar({ proposalDraft, topK: 5 });
             setSimilarItems(res.similarItems);
+            setSimilarDraftSignature(draftSignature);
             setReviewResult(null);
             if (res.notice) {
                 setMessage(res.notice);
@@ -140,6 +139,10 @@ export default function ProposalPage() {
         }
         if (similarItems.length === 0) {
             setError("先に類似施策を取得してください。");
+            return;
+        }
+        if (similarDraftSignature !== draftSignature) {
+            setError("企画内容が更新されています。先に「類似施策を探す」を再実行してください。");
             return;
         }
         setReviewing(true);
