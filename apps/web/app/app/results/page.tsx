@@ -32,6 +32,37 @@ const toScore100 = (score: number): number => {
   return Math.max(0, Math.min(100, normalized));
 };
 
+const AXIS_LABELS: Record<string, string> = {
+  need: "ニーズ",
+  support: "支援力",
+  feasibility: "実現性"
+};
+
+function AxisBreakdown({ axisScore }: { axisScore: { need: number; support: number; feasibility: number } }) {
+  const axes = (["need", "support", "feasibility"] as const).filter(
+    (k) => axisScore[k] > 0
+  );
+  if (axes.length === 0) return null;
+  return (
+    <Stack mt={2} spacing={1}>
+      {axes.map((k) => {
+        const pct = Math.round(axisScore[k] * 100);
+        return (
+          <HStack key={k} spacing={2}>
+            <Text fontSize="xs" color="gray.500" w="44px" flexShrink={0}>
+              {AXIS_LABELS[k]}
+            </Text>
+            <Progress value={pct} size="xs" borderRadius="full" colorScheme="orange" flex={1} />
+            <Text fontSize="xs" color="gray.600" w="30px" textAlign="right">
+              {pct}%
+            </Text>
+          </HStack>
+        );
+      })}
+    </Stack>
+  );
+}
+
 function ResultsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -110,6 +141,7 @@ function ResultsContent() {
                   </Badge>
                 </HStack>
                 <Progress mt={2} value={score100} size="sm" borderRadius="full" colorScheme="orange" />
+                {city.axisScore && <AxisBreakdown axisScore={city.axisScore} />}
               </Box>
             );
           })}
@@ -125,27 +157,29 @@ function ResultsContent() {
           {similarCities.map((city, idx) => {
             const score100 = toScore100(city.score);
             return (
-              <HStack
+              <Box
                 key={`${city.municipalityCode}-${idx}`}
-                justify="space-between"
                 borderWidth="1px"
                 rounded="lg"
                 px={3}
                 py={2}
               >
-                <HStack>
-                  <Badge colorScheme="gray" minW="28px" textAlign="center">
-                    {idx + 1}
+                <HStack justify="space-between">
+                  <HStack>
+                    <Badge colorScheme="gray" minW="28px" textAlign="center">
+                      {idx + 1}
+                    </Badge>
+                    <Text fontSize="sm">{city.municipalityName}</Text>
+                    <Text fontSize="xs" color="gray.500">
+                      ({city.municipalityCode})
+                    </Text>
+                  </HStack>
+                  <Badge colorScheme="orange" variant="subtle">
+                    {score100.toFixed(1)}点
                   </Badge>
-                  <Text fontSize="sm">{city.municipalityName}</Text>
-                  <Text fontSize="xs" color="gray.500">
-                    ({city.municipalityCode})
-                  </Text>
                 </HStack>
-                <Badge colorScheme="orange" variant="subtle">
-                  {score100.toFixed(1)}点
-                </Badge>
-              </HStack>
+                {city.axisScore && <AxisBreakdown axisScore={city.axisScore} />}
+              </Box>
             );
           })}
           {!loading && similarCities.length === 0 ? (

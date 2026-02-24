@@ -14,6 +14,7 @@ export type TwinCity = {
   municipalityCode: string;
   municipalityName: string;
   score: number;
+  axisScore?: { need: number; support: number; feasibility: number };
 };
 
 export type Policy = {

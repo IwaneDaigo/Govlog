@@ -102,6 +102,10 @@ def _parse_xml(xml_bytes: bytes) -> dict[str, dict[str, float | None]]:
     status = root.findtext(".//STATUS")
     if status != "0":
         error_msg = root.findtext(".//ERROR_MSG", "Unknown error")
+        # status=1 は「該当データなし」— エラーではなく空データとして扱う
+        if status == "1":
+            logger.warning("e-Stat: no data (status=1): %s", error_msg)
+            return {}
         raise RuntimeError(f"e-Stat API error (status={status}): {error_msg}")
 
     # 指標コード → 表示名（例: "A1101" → "A1101_総人口【人】"）
@@ -165,13 +169,20 @@ async def fetch_all_data(
 
     async def _guarded(cfg: dict, batch: list[str]) -> dict[str, dict[str, float | None]]:
         async with sem:
-            return await asyncio.to_thread(
-                _fetch_one,
-                app_id,
-                str(cfg["statsDataId"]),
-                list(cfg["cdCat01"]),
-                batch,
-            )
+            try:
+                return await asyncio.to_thread(
+                    _fetch_one,
+                    app_id,
+                    str(cfg["statsDataId"]),
+                    list(cfg["cdCat01"]),
+                    batch,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "e-Stat fetch failed (statsDataId=%s, areas=%d): %s",
+                    cfg["statsDataId"], len(batch), exc,
+                )
+                return {}
 
     tasks = [
         _guarded(cfg, batch)

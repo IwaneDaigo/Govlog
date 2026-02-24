@@ -21,6 +21,7 @@ type TwinCity = {
   municipalityCode: string;
   municipalityName: string;
   score: number;
+  axisScore?: { need: number; support: number; feasibility: number };
 };
 
 type TwinsMap = Record<string, TwinCity[]>;
@@ -393,10 +394,11 @@ const buildSimilarCitiesFromSimilarity = async (
   try {
     if (!similarityClient) return null;
     const result = await similarityClient.similarity(payload);
-    const items = result.items ?? [];
-    if (items.length === 0) return null;
+    const neighbors = result.neighbors ?? [];
+    if (neighbors.length === 0) return null;
 
-    return items.map((code) => {
+    return neighbors.map((neighbor) => {
+      const code = neighbor.city;
       const masterName = municipalityMasterByCode[code]?.municipalityDisplayName ?? municipalityMasterByCode[code]?.municipalityName;
       const localName =
         municipalities[code]?.name ??
@@ -404,8 +406,9 @@ const buildSimilarCitiesFromSimilarity = async (
 
       return {
         municipalityCode: code,
-        municipalityName: result.names?.[code] ?? masterName ?? localName ?? code,
-        score: result.scores?.[code] ?? 0
+        municipalityName: neighbor.city_name || masterName || localName || code,
+        score: neighbor.total_similarity,
+        axisScore: neighbor.axis_similarity
       };
     });
   } catch (error) {
