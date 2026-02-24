@@ -13,10 +13,41 @@ import {
     HStack,
     Input,
     Link,
+    Spinner,
     Stack,
     Text
 } from "@chakra-ui/react";
 import { api, Municipality, ProposalCsvReviewRow } from "../../../lib/api";
+
+const PROPOSAL_DEMO_MODE = (process.env.NEXT_PUBLIC_PROPOSAL_DEMO_MODE ?? "true").toLowerCase() !== "false";
+const DEMO_LOADING_MS = 3000;
+
+const DEMO_ADVICE = {
+    overall: [
+        "とてもよく考えられた企画です。",
+        "「待機児童を減らす」だけでなく、妊娠期から就学前まで寄り添う支援を入れている点は特に良いです。",
+        "量（保育定員）と質（伴走支援）の両方に取り組もうとしている点は、高評価です。",
+        "ただし、さらに良くできるポイントもあります。"
+    ],
+    goodPoints: [
+        "① 数値目標が明確: 「定員250人増」「待機児童ゼロ」など、成果がわかりやすい。",
+        "② 伴走型支援の考え方が現代的: 単なる保育拡充ではなく、子どもの成長全体を見る姿勢がある。"
+    ],
+    improvePoints: [
+        "① 小学校とのつながりが弱い: 幼保小連携会議、公開授業、共同研修などの制度化が有効。",
+        "② 地域との連携が弱い: 地域ボランティア、休日学習支援、公民館活用を組み込むと厚みが出る。",
+        "③ 指標が量寄り: 保護者の安心感や子育て孤立の減少など、質のアウトカム指標を増やす。"
+    ],
+    proposals: [
+        "提案① 幼保小連携モデルを追加（連絡会、架け橋カリキュラム、合同研修）。",
+        "提案② 放課後・休日学習支援を組み込む（地域・大学生・公民館活用）。",
+        "提案③ 成果指標を更新（保護者復職率、子育て満足度、小1不安軽減率、第2子出生率）。"
+    ],
+    final: [
+        "方向性はとても良いです。特に伴走支援を入れているのは大きな強みです。",
+        "教育との接続、地域との連携、成果指標の質的高度化を入れれば、ワンランク上の政策になります。"
+    ]
+};
 
 export default function ProposalPage() {
     const router = useRouter();
@@ -28,6 +59,8 @@ export default function ProposalPage() {
     const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
     const [downloadName, setDownloadName] = useState("proposal-review.csv");
     const [reviewRows, setReviewRows] = useState<ProposalCsvReviewRow[]>([]);
+    const [showDemoAdvice, setShowDemoAdvice] = useState(false);
+    const [fakeLoading, setFakeLoading] = useState(false);
 
     useEffect(() => {
         api.me()
@@ -56,6 +89,8 @@ export default function ProposalPage() {
         setError(null);
         setMessage(null);
         setReviewRows([]);
+        setShowDemoAdvice(false);
+        setFakeLoading(false);
         if (downloadUrl) {
             URL.revokeObjectURL(downloadUrl);
             setDownloadUrl(null);
@@ -75,6 +110,26 @@ export default function ProposalPage() {
         setSubmitting(true);
         setError(null);
         setMessage(null);
+        setShowDemoAdvice(false);
+
+        if (PROPOSAL_DEMO_MODE) {
+            setFakeLoading(true);
+            setReviewRows([]);
+            if (downloadUrl) {
+                URL.revokeObjectURL(downloadUrl);
+                setDownloadUrl(null);
+            }
+            try {
+                await new Promise((resolve) => setTimeout(resolve, DEMO_LOADING_MS));
+                setShowDemoAdvice(true);
+               
+            } finally {
+                setFakeLoading(false);
+                setSubmitting(false);
+            }
+            return;
+        }
+
         try {
             const result = await api.proposalReviewCsv(csvFile);
             if (downloadUrl) {
@@ -143,6 +198,68 @@ export default function ProposalPage() {
                 </Stack>
             </Box>
 
+            {fakeLoading ? (
+                <Box rounded="2xl" bg="white" p={6} shadow="sm" borderWidth="1px">
+                    <HStack spacing={3}>
+                        <Spinner size="sm" />
+                        <Text fontSize="sm" color="gray.700">
+                            添削アドバイスを生成中です...
+                        </Text>
+                    </HStack>
+                </Box>
+            ) : null}
+
+            {showDemoAdvice ? (
+                <Box rounded="2xl" bg="white" p={6} shadow="sm" borderWidth="1px">
+                    <Stack spacing={4}>
+                        <Box>
+                            <Text fontWeight="bold" fontSize="sm">🌟 全体コメント</Text>
+                            <Stack mt={1} spacing={1}>
+                                {DEMO_ADVICE.overall.map((line) => (
+                                    <Text key={line} fontSize="sm">{line}</Text>
+                                ))}
+                            </Stack>
+                        </Box>
+
+                        <Box>
+                            <Text fontWeight="bold" fontSize="sm">👍 良いところ</Text>
+                            <Stack mt={1} spacing={1}>
+                                {DEMO_ADVICE.goodPoints.map((line) => (
+                                    <Text key={line} fontSize="sm">{line}</Text>
+                                ))}
+                            </Stack>
+                        </Box>
+
+                        <Box>
+                            <Text fontWeight="bold" fontSize="sm">🤔 もう一歩なところ</Text>
+                            <Stack mt={1} spacing={1}>
+                                {DEMO_ADVICE.improvePoints.map((line) => (
+                                    <Text key={line} fontSize="sm">{line}</Text>
+                                ))}
+                            </Stack>
+                        </Box>
+
+                        <Box>
+                            <Text fontWeight="bold" fontSize="sm">💡 改善提案</Text>
+                            <Stack mt={1} spacing={1}>
+                                {DEMO_ADVICE.proposals.map((line) => (
+                                    <Text key={line} fontSize="sm">{line}</Text>
+                                ))}
+                            </Stack>
+                        </Box>
+
+                        <Box>
+                            <Text fontWeight="bold" fontSize="sm">🎯 最終評価</Text>
+                            <Stack mt={1} spacing={1}>
+                                {DEMO_ADVICE.final.map((line) => (
+                                    <Text key={line} fontSize="sm">{line}</Text>
+                                ))}
+                            </Stack>
+                        </Box>
+                    </Stack>
+                </Box>
+            ) : null}
+
             {summaryRows.length > 0 ? (
                 <Box rounded="2xl" bg="white" p={6} shadow="sm" borderWidth="1px">
                     <Heading size="md" mb={3}>総評</Heading>
@@ -179,4 +296,3 @@ export default function ProposalPage() {
         </Stack>
     );
 }
-
