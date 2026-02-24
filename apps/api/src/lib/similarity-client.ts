@@ -6,10 +6,26 @@ export interface SimilarityRequest {
   indicators?: string[];
 }
 
+export interface AxisSimilarityDetail {
+  need: number;
+  support: number;
+  feasibility: number;
+}
+
+export interface UnifiedNeighbor {
+  city: string;
+  city_name: string;
+  total_similarity: number;
+  axis_similarity: AxisSimilarityDetail;
+  top_features: string[];
+}
+
 export interface SimilarityResponse {
-  items: string[];
-  names?: Record<string, string>;
-  scores?: Record<string, number>;
+  target_city: string;
+  model_used: "general" | "childcare";
+  cluster_id: number;
+  scores: { need: number; support: number; feasibility: number; total: number };
+  neighbors: UnifiedNeighbor[];
   selected_indicators?: string[];
 }
 

@@ -21,10 +21,15 @@ MAX_CONCURRENT = 10  # 同時リクエスト数の上限（レート制限対策
 # ---------------------------------------------------------------------------
 
 STATS_CONFIG: list[dict[str, object]] = [
+    # 社会・人口統計体系 市区町村データ
+    # A1101: 総人口, A7101: 世帯数
+    # A1404: 0〜14歳人口（年少人口）, A1406: 0〜5歳人口
+    # A4101: 保育所数（同統計表内の施設系指標）
     {
         "statsDataId": "0000020201",
-        "cdCat01": ["A1101", "A7101"],
+        "cdCat01": ["A1101", "A7101", "A1404", "A1406", "A4101"],
     },
+    # 経済センサス 産業別売上
     {
         "statsDataId": "0000020203",
         "cdCat01": [
@@ -34,13 +39,21 @@ STATS_CONFIG: list[dict[str, object]] = [
             "C610120", "C610121", "C610122",
         ],
     },
+    # 地方財政状況調査
+    # D2201: 財政力指数, D2202: 経常収支比率, D2209: 一般財源
     {
         "statsDataId": "0000020204",
-        "cdCat01": ["D2201", "D2209"],
+        "cdCat01": ["D2201", "D2202", "D2209"],
     },
+    # 医療施設調査: I5101: 病院数
     {
         "statsDataId": "0000020209",
         "cdCat01": ["I5101"],
+    },
+    # 社会福祉施設等調査: J2503: 保育所数
+    {
+        "statsDataId": "0000020210",
+        "cdCat01": ["J2503"],
     },
 ]
 
@@ -89,6 +102,10 @@ def _parse_xml(xml_bytes: bytes) -> dict[str, dict[str, float | None]]:
     status = root.findtext(".//STATUS")
     if status != "0":
         error_msg = root.findtext(".//ERROR_MSG", "Unknown error")
+        # status=1 は「該当データなし」— エラーではなく空データとして扱う
+        if status == "1":
+            logger.warning("e-Stat: no data (status=1): %s", error_msg)
+            return {}
         raise RuntimeError(f"e-Stat API error (status={status}): {error_msg}")
 
     # 指標コード → 表示名（例: "A1101" → "A1101_総人口【人】"）
@@ -152,13 +169,20 @@ async def fetch_all_data(
 
     async def _guarded(cfg: dict, batch: list[str]) -> dict[str, dict[str, float | None]]:
         async with sem:
-            return await asyncio.to_thread(
-                _fetch_one,
-                app_id,
-                str(cfg["statsDataId"]),
-                list(cfg["cdCat01"]),
-                batch,
-            )
+            try:
+                return await asyncio.to_thread(
+                    _fetch_one,
+                    app_id,
+                    str(cfg["statsDataId"]),
+                    list(cfg["cdCat01"]),
+                    batch,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "e-Stat fetch failed (statsDataId=%s, areas=%d): %s",
+                    cfg["statsDataId"], len(batch), exc,
+                )
+                return {}
 
     tasks = [
         _guarded(cfg, batch)

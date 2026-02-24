@@ -14,7 +14,14 @@ from app.dataset_loader import (
 )
 from app.estat_client import fetch_all_data
 from app.indicator_selector import select_indicators
-from app.models import SimilarityRequest, SimilarityResponse
+from app.childcare_similarity import run_similarity
+from app.models import (
+    AxisSimilarityDetail,
+    ChildcareSimilarityRequest,
+    SimilarityRequest,
+    UnifiedNeighbor,
+    UnifiedSimilarityResponse,
+)
 from app.municipality import all_cd_areas, load_municipality_map
 from app.vectorizer import (
     DatasetBundle,
@@ -62,6 +69,24 @@ app = FastAPI(title="Gov-Sync Similarity Service", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
+# 子育てキーワード判定
+# ---------------------------------------------------------------------------
+
+_CHILDCARE_KEYWORDS: frozenset[str] = frozenset([
+    "子育て", "こども", "子ども", "子供",
+    "保育", "保育所", "保育園",
+    "育児", "育休", "産休",
+    "幼稚園", "幼児", "乳幼児",
+    "児童", "出生", "少子化", "待機児童",
+])
+
+
+def _is_childcare_request(keywords: list[str]) -> bool:
+    """キーワードリストに子育て関連ワードが 1 つでも含まれれば True。"""
+    return any(kw in _CHILDCARE_KEYWORDS for kw in keywords)
+
+
+# ---------------------------------------------------------------------------
 # エンドポイント
 # ---------------------------------------------------------------------------
 
@@ -78,73 +103,147 @@ async def indicators() -> dict:
     return {"indicators": all_indicator_names}
 
 
-@app.post("/similarity", response_model=SimilarityResponse)
-async def similarity(req: SimilarityRequest) -> SimilarityResponse:
+@app.post("/similarity", response_model=UnifiedSimilarityResponse)
+async def similarity(req: SimilarityRequest) -> UnifiedSimilarityResponse:
     """
-    ローカルデータ（dataSet_clean.csv）を使って自治体類似度を計算し、
-    類似度降順の cdArea リストを返す。
+    自治体類似度を計算して UnifiedSimilarityResponse を返す。
 
-    【指標の選定優先順位】
+    【モード自動切替】
+      keywords に子育て関連ワードが含まれる場合 → childcare エンジン（多軸モデル）
+      それ以外 → general エンジン（コサイン類似度）
+
+    【general モードの指標選定優先順位】
       1. indicators が明示指定されていればそのまま使用
       2. keywords があれば指標名マッチ＋同義語辞書で自動選定
       3. どちらもなければ全指標を使用
-
-    処理の流れ:
-        1. 指標を選定
-        2. 対象自治体の特徴量ベクトルを生成
-        3. Z-score 正規化
-        4. cosine 類似度でランキング
-        5. items（cdArea の配列）を返す
     """
+    # ------------------------------------------------------------------
+    # 子育てキーワード → childcare エンジンへルーティング
+    # ------------------------------------------------------------------
+    if req.keywords and _is_childcare_request(req.keywords):
+        logger.info("childcare keywords detected: %s → routing to childcare engine", req.keywords)
+        result = run_similarity(
+            target_cd_area=req.base_cdArea,
+            limit=req.limit,
+        )
+        return UnifiedSimilarityResponse(
+            target_city=result["target_city"],
+            model_used="childcare",
+            cluster_id=result["cluster_id"],
+            scores=result["scores"],
+            neighbors=[
+                UnifiedNeighbor(
+                    city=nb["city"],
+                    city_name=nb["city_name"],
+                    total_similarity=nb["total_similarity"],
+                    axis_similarity=AxisSimilarityDetail(**nb["axis_similarity"]),
+                    top_features=nb["top_features"],
+                )
+                for nb in result["neighbors"]
+            ],
+            selected_indicators=None,
+        )
+
+    # ------------------------------------------------------------------
+    # general エンジン
+    # ------------------------------------------------------------------
     all_areas = [req.base_cdArea] + req.candidate_cdAreas
 
-    # ------------------------------------------------------------------
     # STEP 1: 使用する指標を決定
-    # ------------------------------------------------------------------
     if req.indicators:
-        # 明示指定を優先
         keys = req.indicators
         logger.info("Using explicitly specified indicators: %s", keys)
-
     elif req.keywords:
-        # キーワードから自動選定（直接マッチ → 同義語辞書）
         keys = select_indicators(req.keywords, all_indicator_names)
-
     else:
-        # 全指標を使用
         keys = None
         logger.info("No keywords specified; using all indicators")
 
-    # ------------------------------------------------------------------
     # STEP 2: 特徴量ベクトルを生成
-    # ------------------------------------------------------------------
     raw_vectors = dataset_to_vectors(dataset, all_areas, keys=keys)
 
-    # ------------------------------------------------------------------
     # STEP 3: Z-score 正規化
-    # ------------------------------------------------------------------
     normalised, dim = zscore_normalize(raw_vectors)
 
     if dim == 0:
         logger.warning("No valid features; returning candidates in original order")
-        return SimilarityResponse(items=req.candidate_cdAreas[: req.limit])
+        return UnifiedSimilarityResponse(
+            target_city=req.base_cdArea,
+            model_used="general",
+            scores={"need": 0.0, "support": 0.0, "feasibility": 0.0, "total": 0.0},
+            neighbors=[
+                UnifiedNeighbor(
+                    city=area,
+                    city_name=municipality_map.get(area, area),
+                    total_similarity=0.0,
+                    axis_similarity=AxisSimilarityDetail(),
+                    top_features=[],
+                )
+                for area in req.candidate_cdAreas[: req.limit]
+            ],
+        )
 
-    # ------------------------------------------------------------------
     # STEP 4: 統合ベクトル構築 → cosine 類似度でランキング
-    # ------------------------------------------------------------------
     bundle   = DatasetBundle(normalised=normalised, weight=1.0, dim=dim)
     combined = build_combined_vectors(all_areas, [bundle])
     ranked   = rank_candidates(req.base_cdArea, req.candidate_cdAreas, combined)
     ranked   = ranked[: req.limit]
 
-    items = [area for area, _ in ranked]
+    avg_score = sum(s for _, s in ranked) / len(ranked) if ranked else 0.0
 
-    # keys が None のとき（全指標）はレスポンスには含めない
-    used_indicators = keys if keys is not None else None
+    return UnifiedSimilarityResponse(
+        target_city=req.base_cdArea,
+        model_used="general",
+        scores={"need": 0.0, "support": 0.0, "feasibility": 0.0, "total": round(avg_score, 6)},
+        neighbors=[
+            UnifiedNeighbor(
+                city=area,
+                city_name=municipality_map.get(area, area),
+                total_similarity=round(score, 6),
+                axis_similarity=AxisSimilarityDetail(),
+                top_features=[],
+            )
+            for area, score in ranked
+        ],
+        selected_indicators=keys if keys is not None else None,
+    )
 
-    return SimilarityResponse(
-        items=items,
-        names={area: municipality_map.get(area, area) for area in items},
-        scores={area: round(score, 6) for area, score in ranked},
-        selected_indicators=used_indicators,
+
+@app.post("/similarity/childcare", response_model=UnifiedSimilarityResponse)
+async def similarity_childcare(req: ChildcareSimilarityRequest) -> UnifiedSimilarityResponse:
+    """
+    子育て施策に特化した多軸類似度モデルで類似自治体を抽出する。
+
+    【モデルの特徴】
+      - 課題構造・支援供給・財政実現可能性の 3 軸でコサイン類似度を計算
+      - 財政力指数 ±0.1 / 経常収支比率 ±5% の財政制約フィルタ
+      - KMeans クラスタリングによる同類型分類
+      - 寄与度（特徴量差分）による説明可能な出力
+    """
+    logger.info("childcare similarity request: target=%s", req.target_cdArea)
+
+    result = run_similarity(
+        target_cd_area=req.target_cdArea,
+        year_code=req.year_code,
+        top_level_only=req.top_level_only,
+        limit=req.limit,
+        top_n_features=req.top_n_features,
+    )
+
+    return UnifiedSimilarityResponse(
+        target_city=result["target_city"],
+        model_used="childcare",
+        cluster_id=result["cluster_id"],
+        scores=result["scores"],
+        neighbors=[
+            UnifiedNeighbor(
+                city=nb["city"],
+                city_name=nb["city_name"],
+                total_similarity=nb["total_similarity"],
+                axis_similarity=AxisSimilarityDetail(**nb["axis_similarity"]),
+                top_features=nb["top_features"],
+            )
+            for nb in result["neighbors"]
+        ],
+        selected_indicators=None,
     )

@@ -19,39 +19,92 @@ export interface SimilarityRequest {
   /** 比較元の自治体コード（例: "13100"） */
   base_cdArea: string;
 
-  /** 類似度を計算したい自治体コードのリスト */
-  candidate_cdAreas: string[];
+  /**
+   * 類似度を計算したい自治体コードのリスト
+   * 子育てキーワードが含まれる場合は childcare エンジンが使われるため無視される
+   */
+  candidate_cdAreas?: string[];
 
   /** 返却する上位件数（デフォルト: 20） */
   limit?: number;
 
   /**
-   * 施策キーワード（売上系指標の自動選定に使用）
-   * 例: ["観光", "IT"]
-   * 省略 or 空配列 → 全売上指標を使用
+   * 施策キーワード
+   * 子育て関連ワード（"子育て", "保育", "待機児童" 等）が含まれると
+   * 自動的に childcare エンジン（多軸モデル）へ切り替わる
    */
   keywords?: string[];
 
   /**
-   * 使用する指標名を明示指定（指定時は keywords より優先）
+   * 使用する指標名を明示指定（指定時は keywords より優先、general モードのみ有効）
    * 例: ["A1101_総人口【人】", "C610109_売上金額（民営）（情報通信業）【百万円】"]
    */
   indicators?: string[];
 }
 
-/** POST /similarity レスポンスボディ */
-export interface SimilarityResponse {
-  /** 類似度が高い順の cdArea リスト */
-  items: string[];
+/** POST /similarity/childcare リクエストボディ */
+export interface ChildcareSimilarityRequest {
+  /** 対象自治体コード（例: "01100"） */
+  target_cdArea: string;
 
-  /** cdArea → 自治体名（例: { "28100": "兵庫県神戸市" }） */
-  names?: Record<string, string>;
+  /** 返却する上位件数（デフォルト: 10） */
+  limit?: number;
 
-  /** cdArea → 類似度スコア（-1 〜 1、高いほど類似） */
-  scores?: Record<string, number>;
+  /** 各隣接自治体に返す寄与特徴量の数（デフォルト: 5） */
+  top_n_features?: number;
 
-  /** 実際に使用した指標名のリスト */
-  selected_indicators?: string[];
+  /** 年度コード（デフォルト: "2020100000"） */
+  year_code?: string;
+
+  /** 政令市区を除外するか（デフォルト: true） */
+  top_level_only?: boolean;
+}
+
+/** 軸別コサイン類似度（general モードでは全て 0） */
+export interface AxisSimilarityDetail {
+  need: number;
+  support: number;
+  feasibility: number;
+}
+
+/** 1 候補自治体の類似度情報 */
+export interface UnifiedNeighbor {
+  city: string;
+  city_name: string;
+  total_similarity: number;
+  /** general モードでは全て 0 */
+  axis_similarity: AxisSimilarityDetail;
+  /** general モードでは空配列 */
+  top_features: string[];
+}
+
+/**
+ * POST /similarity・POST /similarity/childcare 共通レスポンス
+ * model_used で実際に使われたエンジンを判別できる
+ */
+export interface UnifiedSimilarityResponse {
+  target_city: string;
+  model_used: "general" | "childcare";
+
+  /** KMeans クラスタ ID（general モードでは 0） */
+  cluster_id: number;
+
+  /**
+   * 軸スコア
+   * general モードでは need/support/feasibility=0、total のみ有効
+   */
+  scores: {
+    need: number;
+    support: number;
+    feasibility: number;
+    total: number;
+  };
+
+  /** 類似自治体リスト（total_similarity 降順） */
+  neighbors: UnifiedNeighbor[];
+
+  /** 実際に使用した指標名（general モードのみ、childcare では null） */
+  selected_indicators: string[] | null;
 }
 
 /** GET /health レスポンス */
@@ -107,10 +160,11 @@ export class SimilarityClient {
   }
 
   /**
-   * 自治体類似度を計算してランキングを返す
+   * 自治体類似度を計算してランキングを返す。
+   * keywords に子育て関連ワードが含まれると自動的に childcare エンジンへ切り替わる。
    *
    * @example
-   * // キーワードで自動選定
+   * // 汎用（キーワードで指標自動選定）
    * const result = await client.similarity({
    *   base_cdArea: "13100",
    *   candidate_cdAreas: ["27100", "28100", "01100"],
@@ -119,15 +173,26 @@ export class SimilarityClient {
    * });
    *
    * @example
-   * // 指標を明示指定
+   * // 子育てキーワード → childcare エンジンへ自動切替
    * const result = await client.similarity({
    *   base_cdArea: "13100",
-   *   candidate_cdAreas: ["27100", "28100"],
-   *   indicators: ["A1101_総人口【人】", "D2201_財政力指数（市町村財政）【‐】"],
+   *   keywords: ["子育て", "保育"],
+   *   limit: 10,
    * });
+   * // result.model_used === "childcare"
    */
-  async similarity(req: SimilarityRequest): Promise<SimilarityResponse> {
-    return this.post<SimilarityResponse>("/similarity", req);
+  async similarity(req: SimilarityRequest): Promise<UnifiedSimilarityResponse> {
+    return this.post<UnifiedSimilarityResponse>("/similarity", req);
+  }
+
+  /**
+   * 子育て特化エンジンで類似自治体を直接取得する。
+   * /similarity に子育てキーワードを渡した場合と同じエンジンが動く。
+   */
+  async similarityChildcare(
+    req: ChildcareSimilarityRequest,
+  ): Promise<UnifiedSimilarityResponse> {
+    return this.post<UnifiedSimilarityResponse>("/similarity/childcare", req);
   }
 
   // ---------------------------------------------------------------------------
