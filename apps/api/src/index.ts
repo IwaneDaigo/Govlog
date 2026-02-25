@@ -1484,8 +1484,6 @@ app.get<{ Querystring: { keyword?: string } }>("/api/search", async (request, re
   );
 
   const keywordMatched = policies.filter((policy) => {
-    // Exclude policies with missing PDF linkage from search results only.
-    if (!policy.pdfUrl) return false;
     if (keywordTokens.length === 0) return true;
     const haystack = `${policy.title} ${policy.summary} ${policy.details} ${policy.keywords.join(" ")}`.toLowerCase();
     return keywordTokens.some((token) => haystack.includes(token));
